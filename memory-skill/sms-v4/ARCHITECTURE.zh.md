@@ -204,8 +204,8 @@ sms-memory/                      ← 安装时可配置
 SMS v4 全自动运行，无需任何手动干预：
 
 ### 每分钟（60 秒定时器）
-由系统 crontab（Linux/macOS）或 Windows Scheduled Tasks 管理。
-无需 OpenClaw 或任何外部服务。
+由 idle-monitor.ps1 管理（仅在 Claude 打开时运行，Claude 关闭时自动退出）。Linux/macOS 使用系统 crontab。
+完全独立运行，无需 OpenClaw。
 ```
 每 60 秒 → compress.py --auto
   ├─ 上次压缩 < 60 秒前？ → 跳过（防重复）

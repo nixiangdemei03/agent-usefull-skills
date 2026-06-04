@@ -205,8 +205,8 @@ sms-memory/                      ← configurable during install
 SMS v4 runs fully automatically with zero manual intervention:
 
 ### Minute-by-minute (60s timer)
-Managed by system crontab (Linux/macOS) or Windows Scheduled Tasks.
-No OpenClaw or external service required.
+Managed by idle-monitor.ps1 on Windows (runs when Claude is open, auto-exits when Claude closes). Linux/macOS uses system crontab.
+Works standalone on any platform without OpenClaw.
 ```
 Every 60 seconds → compress.py --auto
   ├─ Was last compress < 60s ago?  → skip (anti-racing)
