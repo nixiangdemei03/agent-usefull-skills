@@ -204,7 +204,9 @@ sms-memory/                      ← configurable during install
 
 SMS v4 runs fully automatically with zero manual intervention:
 
-### Minute-by-minute (60s cron)
+### Minute-by-minute (60s timer)
+Managed by system crontab (Linux/macOS) or Windows Scheduled Tasks.
+No OpenClaw or external service required.
 ```
 Every 60 seconds → compress.py --auto
   ├─ Was last compress < 60s ago?  → skip (anti-racing)

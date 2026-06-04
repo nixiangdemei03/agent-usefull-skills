@@ -203,7 +203,9 @@ sms-memory/                      ← 安装时可配置
 
 SMS v4 全自动运行，无需任何手动干预：
 
-### 每分钟（60 秒 cron）
+### 每分钟（60 秒定时器）
+由系统 crontab（Linux/macOS）或 Windows Scheduled Tasks 管理。
+无需 OpenClaw 或任何外部服务。
 ```
 每 60 秒 → compress.py --auto
   ├─ 上次压缩 < 60 秒前？ → 跳过（防重复）
