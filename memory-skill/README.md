@@ -22,7 +22,7 @@ bash install.sh
 | 文件 | 说明 |
 |------|------|
 | `SMS_COMPLETE_OVERVIEW.md` | 总览 + claude-mem 对比 |
-| `CLAUDE.md.template` | 自动记忆规则（安装时自动生成） |
+| `sms-v4/CLAUDE.md.template` | 自动记忆规则（安装时自动生成） |
 | `sms-v4/ARCHITECTURE.md` | 架构详解（中英文） |
 | `sms-v4/INSTALL.md` | 安装指南（中英文） |
 
