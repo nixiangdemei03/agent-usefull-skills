@@ -218,7 +218,7 @@ Every 60 seconds → compress.py --auto
        └─ update .last_compress lock
 ```
 
-### Daily midnight (00:00 UTC)
+### Daily midnight (system time, runs at 14:00 UTC)
 ```
 Full compress regardless of changes.
 Ensures FTS5 index is always rebuilt at least once per day.
