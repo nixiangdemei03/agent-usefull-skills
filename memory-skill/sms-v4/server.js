@@ -395,32 +395,59 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const ftsType = args?.type || "";
       const ftsTier = args?.tier || "";
       const ftsLimit = args?.limit || 10;
+      
       try {
-        // existsSync already imported at top
-        if (!existsSync(FTS_DB)) {
-          return { content: [{ type: "text", text: JSON.stringify({ error: "FTS database not found. Run compress first.", fts_db: FTS_DB }) }] };
-        }
         const db = new Database(FTS_DB, { readonly: true });
-        let sql = `SELECT m.id, m.type, m.summary, m.detail, m.tags, m.score, m.tier, m.hit_count, m.timestamp, fts.rank
-                   FROM memories_fts fts
-                   JOIN memories m ON m.rowid = fts.rowid
-                   WHERE memories_fts MATCH ?`;
-        const params = [ftsQuery.replace(/[^a-zA-Z0-9u4e00-u9fff ]/g, " ")];
-        if (ftsType) { sql += ` AND m.type = ?`; params.push(ftsType); }
-        if (ftsTier) { sql += ` AND m.tier = ?`; params.push(ftsTier); }
-        sql += ` ORDER BY fts.rank LIMIT ?`;
+        
+        // Try FTS5 full-text search first (works great for English)
+        let sql = "SELECT m.id, m.type, m.summary, m.detail, m.tags, m.score, m.tier, m.hit_count, m.timestamp, fts.rank FROM memories_fts fts JOIN memories m ON m.rowid = fts.rowid WHERE memories_fts MATCH ?";
+        const params = [ftsQuery];
+        if (ftsType) { sql += " AND m.type = ?"; params.push(ftsType); }
+        if (ftsTier) { sql += " AND m.tier = ?"; params.push(ftsTier); }
+        sql += " ORDER BY fts.rank LIMIT ?";
         params.push(ftsLimit);
+        
         const rows = db.prepare(sql).all(...params);
+        
+        // Update hit_count for found entries
+        for (const row of rows) {
+          try {
+            db.exec("UPDATE memories SET hit_count = hit_count + 1, last_hit = datetime('now') WHERE id = '" + row.id.replace(/'/g, "''") + "'");
+          } catch(e) { /* silently continue */ }
+        }
+        
+        if (rows.length > 0) {
+          const results = rows.map(r => ({
+            id: r.id, type: r.type, summary: r.summary, detail: (r.detail || "").slice(0, 300),
+            tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
+            score: r.score, tier: r.tier, hit_count: r.hit_count + 1, timestamp: r.timestamp,
+            relevance: Math.abs(r.rank)
+          }));
+          db.close();
+          return { content: [{ type: "text", text: JSON.stringify({ total: results.length, query: ftsQuery, entries: results }, null, 2) }] };
+        }
+        
+        // FTS5 returned 0 results - try LIKE fallback (works for CJK)
+        const cleanQ = ftsQuery.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, "").trim();
+        if (cleanQ) {
+          const likeQ = "%" + cleanQ + "%";
+          const likeRows = db.prepare("SELECT id, type, summary, detail, tags, score, tier, hit_count, timestamp FROM memories WHERE summary LIKE ? OR detail LIKE ? OR tags LIKE ? LIMIT ?").all(likeQ, likeQ, likeQ, ftsLimit);
+          const likeResults = likeRows.map(r => ({
+            id: r.id, type: r.type, summary: r.summary, detail: (r.detail || "").slice(0, 300),
+            tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
+            score: r.score, tier: r.tier, hit_count: r.hit_count, timestamp: r.timestamp,
+            relevance: 1.0
+          }));
+          db.close();
+          if (likeResults.length > 0) {
+            return { content: [{ type: "text", text: JSON.stringify({ total: likeResults.length, query: ftsQuery, entries: likeResults, mode: "like_fallback" }, null, 2) }] };
+          }
+        }
+        
         db.close();
-        const results = rows.map(r => ({
-          id: r.id, type: r.type, summary: r.summary, detail: (r.detail || "").slice(0, 300),
-          tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
-          score: r.score, tier: r.tier, hit_count: r.hit_count, timestamp: r.timestamp,
-          relevance: Math.round(r.rank * 100) / 100
-        }));
-        return { content: [{ type: "text", text: JSON.stringify({ total: results.length, query: ftsQuery, entries: results }, null, 2) }] };
+        return { content: [{ type: "text", text: JSON.stringify({ total: 0, query: ftsQuery, entries: [] }, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message, fallback: "Use search_memories instead" }) }] };
+        return { content: [{ type: "text", text: JSON.stringify({ error: "Search failed: " + e.message, query: ftsQuery }, null, 2) }] };
       }
     }
 

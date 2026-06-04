@@ -54,7 +54,7 @@ def rebuild():
     c.execute('''
         CREATE VIRTUAL TABLE memories_fts USING fts5(
             summary, detail, tags, fingerprint,
-            tokenize='ascii'
+            tokenize='unicode61'
         )
     ''')
 

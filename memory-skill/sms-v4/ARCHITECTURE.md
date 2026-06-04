@@ -230,3 +230,16 @@ Placed at `~/CLAUDE.md` during install. Claude Code follows these rules:
 - Automatically calls `search_fts` before answering history questions
 - Filters out greetings, acknowledgments, and noise
 - No user command required — works silently in background
+
+---
+
+## Changelog
+
+### v4 (latest)
+- **FTS5 CJK search**: unicode61 tokenizer + LIKE fallback for Chinese queries.
+  English searches use FTS5; CJK searches automatically fall back to SQL LIKE.
+- **hit_count tracking on FTS search**: search_fts now increments hit_count,
+  consistent with search_memories.
+- **BM25 display**: scores shown as positive values (Math.abs).
+- **Auto-compress**: 60s cron when idle, midnight full rebuild.
+- **CLAUDE.md**: auto-recording rules, timezone auto-detection.
