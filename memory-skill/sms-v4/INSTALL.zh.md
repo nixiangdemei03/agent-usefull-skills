@@ -157,3 +157,48 @@ bash install.sh --uninstall
 rm -rf ~/sms-memory
 rm ~/CLAUDE.md
 ```
+
+---
+
+## Token 使用量测试
+
+SMS v4 内置了 token 计数器，可以测量记忆系统的 token 开销。
+
+### 安装 Tokenizer
+
+```bash
+npm install @anthropic-ai/tokenizer
+```
+
+### SMS v4 基准 Token 开销
+
+以下数据基于 32 条记忆、4 天记录：
+
+| 组件 | Token 数 | 何时加载 |
+|------|----------|---------|
+| CLAUDE.md（自动记忆规则） | ~1,300 | 每次会话启动 |
+| Hot 层（前 20 条） | ~130 | 每次请求 |
+| Consolidated.json（32 条全量） | ~10,600 | 不自动加载，仅搜索时命中 |
+| 单条 search_fts 结果 | ~30 | 按需 |
+
+**每次请求的 SMS 额外开销：** ~1,400 tokens（CLAUDE.md + Hot 层）
+
+相当于在 Claude Code 常规请求的 2-3K tokens 基础上增加约 50%。Consolidated 从不注入上下文——只有搜索结果按需加载。
+
+### 在你的机器上测试
+
+```bash
+node count_tokens.cjs --claude    # 测试 CLAUDE.md
+node count_tokens.cjs --hot       # 测试 Hot 层
+node count_tokens.cjs --consolidated  # 测试全量记忆
+node count_tokens.cjs --all       # 总览
+```
+
+`count_tokens.cjs` 脚本包含在 sms-v4 目录中。
+
+### 理解结果
+
+- CLAUDE.md 约 1,200-1,400 tokens（取决于规则长度）
+- Hot 层随使用缓慢增长，但始终 ≤20 条
+- Consolidated 随积累增长，但**永不自动注入上下文**
+- 更多条目 = 回忆更准，但单次请求成本不变

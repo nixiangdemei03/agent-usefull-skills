@@ -145,3 +145,60 @@ get_stats()
 bash install.sh --uninstall
 rm -rf ~/sms-memory
 rm ~/CLAUDE.md
+
+---
+
+## Token Usage Measurement
+
+SMS v4 includes a token counter tool to measure memory overhead.
+
+### Install Tokenizer
+
+```bash
+# Local install (in sms-v4 directory)
+npm install @anthropic-ai/tokenizer
+
+# Or global install
+npm install -g @anthropic-ai/tokenizer
+```
+
+### SMS v4 Baseline Token Overhead
+
+The following measurements were taken with 32 entries and 4 days of data:
+
+| Component | Tokens | When Loaded |
+|-----------|--------|-------------|
+| CLAUDE.md (auto-recording rules) | ~1,300 | Once per session start |
+| Hot tier cache (top 20 entries) | ~130 | Every request |
+| Consolidated.json (32 entries) | ~10,600 | Not auto-loaded, only on search |
+| Single search_fts result | ~30 | On demand |
+
+**Per-request overhead with SMS v4:** ~1,400 tokens (CLAUDE.md + Hot tier)
+
+This means SMS adds about 50% to a typical Claude Code request (2-3K baseline).
+The consolidated store is never injected into context — only search results are loaded on demand.
+
+### How to Test on Your Machine
+
+```bash
+# Count tokens for your CLAUDE.md
+node count_tokens.cjs --claude
+
+# Count your current Hot tier cache
+node count_tokens.cjs --hot
+
+# Count your full memory store
+node count_tokens.cjs --consolidated
+
+# Get complete overview
+node count_tokens.cjs --all
+```
+
+The `count_tokens.cjs` script is included in the sms-v4 directory.
+
+### Understanding Your Results
+
+- CLAUDE.md should be ~1,200-1,400 tokens (stable, depends on rules)
+- Hot cache grows slowly as you accumulate high-score entries
+- Consolidated grows with usage but is never auto-injected
+- More entries = better recall, same per-request cost
