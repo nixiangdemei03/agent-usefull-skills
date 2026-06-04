@@ -30,8 +30,8 @@ const dirIdx = args.indexOf("--dir");
 const MEMORY_DIR = resolve(
   dirIdx !== -1 && args[dirIdx + 1]
     ? args[dirIdx + 1]
-    : process.env.SMS_MEMORY_DIR
-      ? process.env.SMS_MEMORY_DIR
+    : process.env.EMS_MEMORY_DIR
+      ? process.env.EMS_MEMORY_DIR
       : join(process.cwd(), "memory")
 );
 
@@ -530,7 +530,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           existing.hit_count = (existing.hit_count || 1) + 1;
           // Merge contributors
           const existingContribs = new Set(existing.contributors || [existing.author || "unknown"]);
-          const newAuthor = args?.author || process.env.SMS_AUTHOR || "unknown";
+          const newAuthor = args?.author || process.env.EMS_AUTHOR || "unknown";
           existing.contributors = [...existingContribs, newAuthor].filter((v,i,a) => a.indexOf(v)===i);
           existing.last_author = newAuthor;
           existing.author = existing.author || newAuthor;
@@ -563,10 +563,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
       // 3. New entry
       const newEntry = {
-        author: args?.author || process.env.SMS_AUTHOR || "unknown",
-        contributors: [args?.author || process.env.SMS_AUTHOR || "unknown"],
-        git_origin: process.env.SMS_GIT_REPO || "",
-        last_author: args?.author || process.env.SMS_AUTHOR || "unknown",
+        author: args?.author || process.env.EMS_AUTHOR || "unknown",
+        contributors: [args?.author || process.env.EMS_AUTHOR || "unknown"],
+        git_origin: process.env.EMS_GIT_REPO || "",
+        last_author: args?.author || process.env.EMS_AUTHOR || "unknown",
         id: genId(),
         timestamp: now(),
         type,

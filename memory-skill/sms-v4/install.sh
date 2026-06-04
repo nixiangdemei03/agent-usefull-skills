@@ -243,53 +243,42 @@ if [[ -f "$VSC_CLAUDE_CONFIG" ]]; then
   echo -e "${GREEN}✅ Updated: $VSC_CLAUDE_CONFIG${NC}"
 fi
 
-# ── Summary ─────────────────────────────────────────────────
-
 echo ""
 
-# ── Auto-compress cron ────────────────────────────────────
+# ── Install idle monitor (Windows) ──────────────────────
 echo ""
-echo -e "${CYAN}⏰ Setting up auto-compress...${NC}"
-COMPRESS_SCRIPT="$MEMORY_DIR/scripts/compress.py"
+echo -e "${CYAN}📟 Installing idle monitor...${NC}"
 
-if [[ "$(uname)" == "Linux" ]] || [[ "$(uname)" == "Darwin" ]]; then
-  CRON_CMD="* * * * * python3 $COMPRESS_SCRIPT --auto >/dev/null 2>&1"
-  CRON_MID="0 0 * * * python3 $COMPRESS_SCRIPT >/dev/null 2>&1"
-  (crontab -l 2>/dev/null | grep -v "$COMPRESS_SCRIPT"; \
-   echo "# sms-compress: auto every 60s"; echo "$CRON_CMD"; \
-   echo "# sms-compress: midnight full rebuild"; echo "$CRON_MID") | crontab - 2>/dev/null
-  echo -e "   ${GREEN}✅ Crontab added (every 60s + midnight)${NC}"
-elif [[ -d "/mnt/c" ]]; then
-  PYTHON_PATH=$(which python3 2>/dev/null || which python 2>/dev/null)
-  if [ -n "$PYTHON_PATH" ]; then
-    # Create claude-sms.bat launcher
-    BAT_PATH=$(wslpath -w "$SCRIPT_DIR/scripts/claude-sms.bat" 2>/dev/null || echo "$SCRIPT_DIR/scripts/claude-sms.bat")
-    echo -e "   ${GREEN}✅ claude-sms.bat launcher ready at:${NC}"
-    echo -e "      $SCRIPT_DIR/scripts/claude-sms.bat"
-    echo -e "   ${YELLOW}   Use claude-sms.bat instead of claude to enable idle monitoring.${NC}"
-    
-    powershell.exe -Command "& {
-      try {
-        Unregister-ScheduledTask -TaskName 'sms-auto-compress' -Confirm:$false -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName 'sms-midnight-compress' -Confirm:$false -ErrorAction SilentlyContinue
-        $action1 = New-ScheduledTaskAction -Execute '$PYTHON_PATH' -Argument '$COMPRESS_SCRIPT --auto'
-        $trigger1 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration ([TimeSpan]::MaxValue)
-        Register-ScheduledTask -TaskName 'sms-auto-compress' -Action $action1 -Trigger $trigger1 -Force
-        $action2 = New-ScheduledTaskAction -Execute '$PYTHON_PATH' -Argument '$COMPRESS_SCRIPT'
-        $trigger2 = New-ScheduledTaskTrigger -Daily -At '00:00'
-        Register-ScheduledTask -TaskName 'sms-midnight-compress' -Action $action2 -Trigger $trigger2 -Force
+if [[ -d "/mnt/c" ]]; then
+  CLAUDE_DIR="/mnt/c/Users/$(whoami)/.claude"
+  mkdir -p "$CLAUDE_DIR"
+  cp "$SCRIPT_DIR/scripts/idle-monitor.ps1" "$CLAUDE_DIR/" 2>/dev/null
+  cp "$SCRIPT_DIR/scripts/claude-sms.bat" "$CLAUDE_DIR/" 2>/dev/null
+  echo -e "   ${GREEN}✅ Idle monitor installed at:${NC}"
+  echo -e "      $CLAUDE_DIR/idle-monitor.ps1"
+  echo -e "      $CLAUDE_DIR/claude-sms.bat"
+
+  WIN_CLAUDE_DIR=$(wslpath -w "$CLAUDE_DIR" 2>/dev/null || echo "$CLAUDE_DIR")
+  powershell.exe -Command "& {
+    try {
+      $p = [Environment]::GetEnvironmentVariable('Path', 'User')
+      if ($p -notlike '*$WIN_CLAUDE_DIR*') {
+        [Environment]::SetEnvironmentVariable('Path', $p + ';$WIN_CLAUDE_DIR', 'User')
         Write-Host 'OK'
-      } catch { Write-Host 'FAIL' }
-    }" 2>/dev/null | grep -q OK && echo -e "   ${GREEN}✅ Windows tasks created${NC}" || echo -e "   ${YELLOW}⚠️  Could not create scheduled tasks (run as Admin?)${NC}"
-  fi
+      } else { Write-Host 'OK' }
+    } catch { Write-Host 'FAIL' }
+  }" 2>/dev/null | grep -q OK && echo -e "   ${GREEN}✅ Added to PATH${NC}" || echo -e "   ${YELLOW}⚠ PATH update skipped${NC}"
+
+  echo ""
+  echo -e "   ${YELLOW}📌 Now run 'claude-sms.bat' instead of 'claude'${NC}"
+  echo -e "   ${YELLOW}   Idle >5min → auto compress. Claude exits → final compress.${NC}"
 else
-  echo -e "   ${YELLOW}⚠️  Unsupported OS. Manually add cron:${NC}"
-  echo -e "   ${YELLOW}   * * * * * python3 $COMPRESS_SCRIPT --auto${NC}"
-  echo -e "   ${YELLOW}   0 0 * * * python3 $COMPRESS_SCRIPT${NC}"
+  echo -e "   ${GREEN}✅ Linux/macOS: use system crontab for auto-compress${NC}"
+  echo -e "   ${YELLOW}   crontab -e  →  * * * * * python3 $MEMORY_DIR/scripts/compress.py --auto${NC}"
 fi
 echo ""
 
-echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
+# ── Summary ─────────────────────────────────────────────────echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║   ✅ Installation Complete!          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
 echo ""
