@@ -1,7 +1,10 @@
 # SMS — Auto Memory Rules
 
+
 > You have an MCP server `sms-v4-mcp` connected.
 > DO NOT wait for the user to say "remember this". Record automatically.
+> **Launch:** Use `claude-sms.bat` instead of `claude` to enable idle monitoring + auto compress.
+
 
 ---
 

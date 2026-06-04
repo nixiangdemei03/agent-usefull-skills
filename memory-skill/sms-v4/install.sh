@@ -262,6 +262,12 @@ if [[ "$(uname)" == "Linux" ]] || [[ "$(uname)" == "Darwin" ]]; then
 elif [[ -d "/mnt/c" ]]; then
   PYTHON_PATH=$(which python3 2>/dev/null || which python 2>/dev/null)
   if [ -n "$PYTHON_PATH" ]; then
+    # Create claude-sms.bat launcher
+    BAT_PATH=$(wslpath -w "$SCRIPT_DIR/scripts/claude-sms.bat" 2>/dev/null || echo "$SCRIPT_DIR/scripts/claude-sms.bat")
+    echo -e "   ${GREEN}✅ claude-sms.bat launcher ready at:${NC}"
+    echo -e "      $SCRIPT_DIR/scripts/claude-sms.bat"
+    echo -e "   ${YELLOW}   Use claude-sms.bat instead of claude to enable idle monitoring.${NC}"
+    
     powershell.exe -Command "& {
       try {
         Unregister-ScheduledTask -TaskName 'sms-auto-compress' -Confirm:$false -ErrorAction SilentlyContinue
