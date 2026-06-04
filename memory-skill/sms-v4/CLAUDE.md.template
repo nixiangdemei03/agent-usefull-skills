@@ -1,7 +1,16 @@
 # SMS — Auto Memory Rules
 
-> You have an MCP server `sms-v3-mcp` connected.
+> You have an MCP server `sms-v4-mcp` connected.
 > DO NOT wait for the user to say "remember this". Record automatically.
+
+---
+
+## ⏰ Session Start: Auto-Detect Timezone
+
+On every session start, note the system time. Your system clock is authoritative.
+All timestamps use your local timezone — no need to ask the user.
+
+Use `get_context()` to see current memory stats and verify the system is working.
 
 ---
 
