@@ -246,6 +246,43 @@ fi
 # ── Summary ─────────────────────────────────────────────────
 
 echo ""
+
+# ── Auto-compress cron ────────────────────────────────────
+echo ""
+echo -e "${CYAN}⏰ Setting up auto-compress...${NC}"
+COMPRESS_SCRIPT="$MEMORY_DIR/scripts/compress.py"
+
+if [[ "$(uname)" == "Linux" ]] || [[ "$(uname)" == "Darwin" ]]; then
+  CRON_CMD="* * * * * python3 $COMPRESS_SCRIPT --auto >/dev/null 2>&1"
+  CRON_MID="0 0 * * * python3 $COMPRESS_SCRIPT >/dev/null 2>&1"
+  (crontab -l 2>/dev/null | grep -v "$COMPRESS_SCRIPT"; \
+   echo "# sms-compress: auto every 60s"; echo "$CRON_CMD"; \
+   echo "# sms-compress: midnight full rebuild"; echo "$CRON_MID") | crontab - 2>/dev/null
+  echo -e "   ${GREEN}✅ Crontab added (every 60s + midnight)${NC}"
+elif [[ -d "/mnt/c" ]]; then
+  PYTHON_PATH=$(which python3 2>/dev/null || which python 2>/dev/null)
+  if [ -n "$PYTHON_PATH" ]; then
+    powershell.exe -Command "& {
+      try {
+        Unregister-ScheduledTask -TaskName 'sms-auto-compress' -Confirm:$false -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName 'sms-midnight-compress' -Confirm:$false -ErrorAction SilentlyContinue
+        $action1 = New-ScheduledTaskAction -Execute '$PYTHON_PATH' -Argument '$COMPRESS_SCRIPT --auto'
+        $trigger1 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration ([TimeSpan]::MaxValue)
+        Register-ScheduledTask -TaskName 'sms-auto-compress' -Action $action1 -Trigger $trigger1 -Force
+        $action2 = New-ScheduledTaskAction -Execute '$PYTHON_PATH' -Argument '$COMPRESS_SCRIPT'
+        $trigger2 = New-ScheduledTaskTrigger -Daily -At '00:00'
+        Register-ScheduledTask -TaskName 'sms-midnight-compress' -Action $action2 -Trigger $trigger2 -Force
+        Write-Host 'OK'
+      } catch { Write-Host 'FAIL' }
+    }" 2>/dev/null | grep -q OK && echo -e "   ${GREEN}✅ Windows tasks created${NC}" || echo -e "   ${YELLOW}⚠️  Could not create scheduled tasks (run as Admin?)${NC}"
+  fi
+else
+  echo -e "   ${YELLOW}⚠️  Unsupported OS. Manually add cron:${NC}"
+  echo -e "   ${YELLOW}   * * * * * python3 $COMPRESS_SCRIPT --auto${NC}"
+  echo -e "   ${YELLOW}   0 0 * * * python3 $COMPRESS_SCRIPT${NC}"
+fi
+echo ""
+
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║   ✅ Installation Complete!          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
