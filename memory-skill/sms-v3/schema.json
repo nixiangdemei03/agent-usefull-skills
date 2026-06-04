@@ -1,0 +1,121 @@
+{
+  "schema_version": "3.0",
+  "description": "SMS v3 — 三层架构：raw 全量日志 → 日去重文件 → 合并压缩 consolidated",
+  "entry_types": {
+    "knowledge": {
+      "description": "Factual knowledge learned — code, commands, concepts, workflows",
+      "fields": ["timestamp", "topic", "detail", "source", "tags", "confidence"]
+    },
+    "decision": {
+      "description": "A decision made, with rationale and alternatives considered",
+      "fields": ["timestamp", "what", "why", "alternatives", "impact"]
+    },
+    "preference": {
+      "description": "User preference or behavior pattern discovered",
+      "fields": ["timestamp", "area", "preference", "context", "examples"]
+    },
+    "event": {
+      "description": "Significant event (task complete, milestone, issue)",
+      "fields": ["timestamp", "what", "outcome", "next_steps"]
+    },
+    "failure": {
+      "description": "Mistake or failed attempt — what went wrong and the fix",
+      "fields": ["timestamp", "attempt", "error", "fix", "lesson"]
+    },
+    "chat": {
+      "description": "Casual chat that revealed useful info or context",
+      "fields": ["timestamp", "topic", "detail", "importance"]
+    },
+    "chat_insight": {
+      "description": "Casual chat that unexpectedly revealed useful info",
+      "fields": ["timestamp", "topic", "insight", "importance"]
+    },
+    "context_switch": {
+      "description": "Change in active project, task, or focus area",
+      "fields": ["timestamp", "from", "to", "reason"]
+    },
+    "insight": {
+      "description": "Observation or pattern noticed across interactions",
+      "fields": ["timestamp", "observation", "evidence", "implication"]
+    }
+  },
+  "tiers": {
+    "description": "三层存储架构",
+    "raw": {
+      "path": "auto/raw/YYYY-MM-DD.raw.json",
+      "description": "🥉 全量最小格式日志，只增不改，永不删除。每条 ~50-100 bytes",
+      "fields": ["t", "s", "tp", "fp"],
+      "field_map": {
+        "t": "timestamp (HH:MM:SS)",
+        "s": "summary (title)",
+        "tp": "entry type",
+        "fp": "fingerprint"
+      },
+      "retention": "永久"
+    },
+    "daily": {
+      "path": "auto/YYYY-MM-DD.json",
+      "description": "🥈 当天去重后的完整条目，含 detail / tags / hit_count",
+      "retention": "保留至下轮 compress 后，原始信息在 raw 中永存"
+    },
+    "consolidated": {
+      "path": "curated/consolidated.json",
+      "description": "🥇 跨天压缩，高频全量保留 + 低频 title_only",
+      "tier_rules": {
+        "hot":   {"min_score": 8,  "max": 20,  "retention": "全量 detail"},
+        "warm":  {"min_score": 3,  "max": 100, "retention": "全量 detail"},
+        "cold":  {"min_score": 0,             "retention": "title_only，source 指针指向 raw"}
+      }
+    }
+  },
+  "entry_schema": {
+    "description": "完整条目的字段定义",
+    "required": ["id", "timestamp", "type", "summary", "fingerprint"],
+    "properties": {
+      "id": {"type": "string"},
+      "timestamp": {"type": "string"},
+      "type": {"type": "string", "enum": ["knowledge", "decision", "preference", "event", "failure", "chat", "chat_insight", "context_switch", "insight"]},
+      "summary": {"type": "string", "maxLength": 200},
+      "detail": {"type": "string"},
+      "tags": {"type": "array", "items": {"type": "string"}},
+      "fingerprint": {"type": "string"},
+      "hit_count": {"type": "integer", "minimum": 1},
+      "last_hit": {"type": "string"},
+      "score": {"type": "number"},
+      "tier": {"type": "string", "enum": ["hot", "warm", "cold", "archive"]},
+      "importance": {"type": "integer", "minimum": 1, "maximum": 5},
+      "context": {"type": "string"},
+      "related_ids": {"type": "array", "items": {"type": "string"}},
+      "author": {"type": "string"},
+      "contributors": {"type": "array", "items": {"type": "string"}},
+      "merged_from": {"type": "array", "items": {"type": "string"}},
+
+      "title_only": {
+        "type": "boolean",
+        "description": "true 表示此条目在 consolidated 中仅保留 title，detail 需从 raw 日志中按 fingerprint 回溯"
+      },
+      "source_raw": {
+        "type": "string",
+        "description": "当 title_only=true，指向原始 raw 日志文件路径"
+      }
+    }
+  },
+  "scoring": {
+    "formula": "score = hit_count × recency_factor",
+    "recency_factor": {
+      "<1d": 3.0, "<7d": 1.5, "<30d": 1.0, "else": 0.5
+    },
+    "title_only_threshold": {
+      "cold_entries": true,
+      "types_always_full": ["knowledge", "decision", "insight", "failure"],
+      "types_prefer_title": ["event", "context_switch", "chat", "chat_insight"],
+      "override_if_hit_count_ge": 5
+    }
+  },
+  "compress": {
+    "algorithm": "1) dirty check (stat) → 2) read raw logs → 3) fingerprint group → 4) merge & score → 5) title_only downgrade → 6) write consolidated",
+    "dirty_check": "compare mtime of compressed:latest_auto:latest_raw. 跳过若已最新",
+    "trigger": "会话结束时自动跑，心跳检查跳过无变更",
+    "typical_time_ms": 200
+  }
+}

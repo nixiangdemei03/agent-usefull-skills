@@ -1,0 +1,176 @@
+# SMS — Auto Memory Rules
+
+> You have an MCP server `sms-v3-mcp` connected.
+> DO NOT wait for the user to say "remember this". Record automatically.
+
+---
+
+## Decision Tree: Should I remember this?
+
+Ask yourself these questions in order:
+
+### Q1: Did I learn something new?
+
+If you learned a command, API, configuration, concept, or workflow → YES → `knowledge`
+
+```
+User: "curl -X POST -H 'Content-Type: application/json' -d '{...}' https://api.example.com"
+You learned a new curl pattern → write_or_merge(type=knowledge)
+```
+
+### Q2: Did the user reveal a preference?
+
+If the user expressed liking/disliking, a habit, or a working style → YES → `preference`
+
+```
+User: "I prefer JSON over YAML"
+User: "I use VS Code, not PyCharm"
+User: "Don't email me, just tell me here"
+User: "I live in Sydney"   → timezone preference
+```
+
+### Q3: Did we make a decision?
+
+If you and the user chose option A over B with a reason → YES → `decision`
+
+Include WHY in the detail field. The reason is more valuable than the choice.
+
+### Q4: Did we fix something?
+
+If you solved an error, bug, or problem → YES → `failure`
+
+Record the SOLUTION, not the error message.
+Errors change. Solutions last.
+
+### Q5: Did we finish something?
+
+A task with a concrete outcome → YES → `event`
+
+### Q6: Did I notice a pattern across sessions?
+
+If the same thing happened 3+ times in different conversations → YES → `insight`
+
+This is the most valuable type. It connects dots the user hasn't connected yet.
+
+### Q7: Did the user say "remember this"?
+
+YES → figure out the type and record it.
+
+### Can't decide? Just call `write_or_merge`.
+
+Fingerprint dedup will handle duplicates. It's better to record something unimportant than to miss something important.
+
+---
+
+## What NOT to record
+
+| Type | Examples | Why skip |
+|------|----------|----------|
+| Greetings | "hi", "hello", "good morning", "good night" | Conversation noise |
+| Acknowledgments | "ok", "got it", "thanks", "understood" | No information |
+| Status | "let me check", "let me try", "one moment" | Transient |
+| Unresolved discussions | "this doesn't work" → "try this" → "still broken" (no resolution) | No outcome |
+| Duplicates | User says the same thing again | Already recorded, merge via fingerprint |
+| Error messages | Raw error text without a fix | Record the fix, not the symptom |
+
+---
+
+## Search Rules
+
+### Before answering a history question:
+
+```
+User: "remember that script we wrote?"
+→ Search: search_fts("script") → if 0: search_fts("book_tennis")
+
+User: "what's my python setup?"
+→ Search: search_fts("python") → search_fts("config")
+```
+
+### Search strategy:
+
+1. Extract keywords from the user's question
+2. Call `search_fts` with the most specific keyword first
+3. If 0 results, try a related term
+4. Only say "I don't have a record" after 2-3 attempts
+
+### If you find a match:
+
+```
+Result found → Reference it in your answer
+              → Also call hit_memory(id) to update its score
+```
+
+---
+
+## Tagging Guide
+
+Tags are critical for fingerprint dedup and future search.
+
+Good tags:
+```
+tags: ["ssh", "cse", "unsw"]
+tags: ["regex", "grep", "pitfall"]
+tags: ["python", "preference"]
+```
+
+Bad tags:
+```
+tags: ["learned", "stuff", "note", "important"]
+```
+
+---
+
+## Writing Quality
+
+A good entry should make sense 3 months from now.
+
+```
+Bad summary:  "fixed the bug"
+Good summary: "ENOENT error when config.json is missing — check working directory"
+
+Bad detail:  "user prefers it"
+Good detail: "User prefers JSON over MD because it's machine-parseable and can be shared across agents via Git"
+```
+
+---
+
+## Examples
+
+### Example 1
+```
+User: "write a Python script to parse this JSON"
+→ preference("User prefers Python")
+→ knowledge("parsing JSON in Python with json.loads()")
+```
+
+### Example 2
+```
+User: "API keeps returning 403"
+You: "check if token expired?"
+User: "yes, new token fixed it"
+→ failure("403 error → check token expiry first, solution: refresh token")
+```
+
+### Example 3
+```
+User: "hi"
+You: "hello"
+User: "can we change the tennis court script?"
+→ greeting skipped
+→ search_fts("tennis") or search_fts("court") → found → reference it
+```
+
+### Example 4
+```
+User: "I think I'll use Django because the team knows it and the ecosystem is mature"
+→ decision("Chose Django over FastAPI because team familiarity and ecosystem maturity")
+```
+
+---
+
+## Reminder
+
+You are not a filing clerk. You are an intelligent assistant building a model of the user.
+
+Record every time you understand them better. Ignore every utterance that doesn't deepen that understanding.
