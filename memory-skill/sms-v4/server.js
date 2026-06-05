@@ -37,7 +37,7 @@ const MEMORY_DIR = resolve(
 
 const SERVER_NAME = "ems-v4-mcp";
 const FTS_DB = join(MEMORY_DIR, "fts", "memory.db");
-const SERVER_VERSION = "4.1.0";
+const SERVER_VERSION = "4.0.0";
 
 // ── Helpers ──
 
@@ -368,6 +368,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: "object", properties: {} },
     },
     {
+      name: "recalc_score",
+      description: "v3: 按 Score = I × e^(-λt) × log(f+1) 重算指定 entry 的 score 和新 tier。不含 entry_id 则重算全部",
+      inputSchema: {
+        type: "object",
+        properties: {
+          entry_id: { type: "string", description: "单个 entry id，不传则全量重算" },
+        },
+      },
+    },
+    {
+      name: "update_entry",
+      description: "v3: 更新指定 entry 的字段（tier / importance），或同时修改。需 entry_id",
+      inputSchema: {
+        type: "object",
+        properties: {
+          entry_id: { type: "string", description: "必须: entry id" },
+          tier: { type: "string", enum: ["hot", "warm", "cold"], description: "可选: 设置新 tier" },
+          importance: { type: "number", minimum: 1, maximum: 10, description: "可选: 更新重要性 1-10" },
+          force_recalc: { type: "boolean", description: "是否强制重算 score (默认 true)" },
+        },
+        required: ["entry_id"],
+      },
+    },
+    {
       name: "get_stats",
       description: "v2: 获取记忆系统统计：tier 分布、最高分条目、总条目数",
       inputSchema: { type: "object", properties: {} },
@@ -653,6 +677,110 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             score: e.score, hit_count: e.hit_count, tags: e.tags,
           })),
         }, null, 2) }],
+      };
+    }
+
+    // ── recalc_score ──
+    case "recalc_score": {
+      const recalcId = args?.entry_id || null;
+      let count = 0;
+      const db = new Database(FTS_DB);
+
+      if (recalcId) {
+        const row = db.prepare("SELECT * FROM memories WHERE id = ?").get(recalcId);
+        if (row) {
+          const newScore = calcScore(row.hit_count, row.last_hit || row.timestamp, row.importance);
+          const allRows = db.prepare("SELECT id, hit_count, last_hit, importance FROM memories").all();
+          const scored = allRows.map(r => ({ ...r, _ns: calcScore(r.hit_count, r.last_hit, r.importance) }));
+          scored.sort((a, b) => b._ns - a._ns);
+          const pos = scored.findIndex(r => r.id === recalcId);
+          const tier = pos < 20 ? "hot" : pos < 120 ? "warm" : "cold";
+          db.prepare("UPDATE memories SET score = ?, tier = ? WHERE id = ?").run(newScore, tier, recalcId);
+          count = 1;
+        }
+      } else {
+        const rows = db.prepare("SELECT id, hit_count, last_hit, importance FROM memories").all();
+        const scored = rows.map(r => ({ ...r, _ns: calcScore(r.hit_count, r.last_hit, r.importance) }));
+        scored.sort((a, b) => b._ns - a._ns);
+        scored.forEach((r, i) => {
+          const tier = i < 20 ? "hot" : i < 120 ? "warm" : "cold";
+          db.prepare("UPDATE memories SET score = ?, tier = ? WHERE id = ?").run(r._ns, tier, r.id);
+        });
+        count = scored.length;
+      }
+      db.close();
+
+      try {
+        const { execSync } = require("child_process");
+        execSync(`python3 "${join(MEMORY_DIR, "scripts", "compress.py")}"`, { timeout: 10000 });
+      } catch(e) {}
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          status: "ok", action: "recalc_score", count,
+          formula: "Score = I × e^(-λt) × log(f+1), half_life=21days",
+        }) }],
+      };
+    }
+
+    // ── update_entry ──
+    case "update_entry": {
+      const uid = args?.entry_id;
+      if (!uid) return { content: [{ type: "text", text: "Error: entry_id required" }] };
+      const newTier = args?.tier || null;
+      const newImportance = args?.importance || null;
+
+      let found = false;
+      let db = null;
+      try { db = new Database(FTS_DB); } catch(e) {}
+
+      const autoFiles = listJSONFiles("auto");
+      for (const file of autoFiles) {
+        const entries = readJSON(`auto/${file}`) || [];
+        for (let i = 0; i < entries.length; i++) {
+          if (entries[i].id === uid) {
+            if (newTier) entries[i].tier = newTier;
+            if (newImportance) entries[i].importance = newImportance;
+            entries[i].score = calcScore(entries[i].hit_count || 1, entries[i].last_hit, newImportance || entries[i].importance);
+            writeJSON(`auto/${file}`, entries);
+            found = true;
+            if (db) {
+              if (newTier) db.prepare("UPDATE memories SET tier = ? WHERE id = ?").run(newTier, uid);
+              if (newImportance) db.prepare("UPDATE memories SET importance = ?, score = ? WHERE id = ?").run(newImportance, entries[i].score, uid);
+              if (!newImportance && newTier) db.prepare("UPDATE memories SET tier = ? WHERE id = ?").run(newTier, uid);
+            }
+            break;
+          }
+        }
+        if (found) break;
+      }
+
+      if (!found) {
+        const consolidated = readJSON("curated/consolidated.json");
+        if (consolidated?.entries) {
+          for (const e of consolidated.entries) {
+            if (e.id === uid) {
+              if (newTier) e.tier = newTier;
+              if (newImportance) e.importance = newImportance;
+              e.score = calcScore(e.hit_count || 1, e.last_hit, newImportance || e.importance);
+              saveJSON("curated/consolidated.json", consolidated);
+              found = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (db) db.close();
+      try {
+        const { execSync } = require("child_process");
+        execSync(`python3 "${join(MEMORY_DIR, "scripts", "compress.py")}"`, { timeout: 10000 });
+      } catch(e) {}
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          status: found ? "ok" : "not_found", id: uid, tier: newTier, importance: newImportance,
+        }) }],
       };
     }
 
