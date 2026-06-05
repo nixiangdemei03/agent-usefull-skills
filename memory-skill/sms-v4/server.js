@@ -71,13 +71,12 @@ function genId() {
 }
 
 /**
- * v2: 生成 fingerprint 用于查重
- * 算法: sorted(tags).join(',') + '|' + summary.trim().slice(0,50).toLowerCase()
+ * v3: 生成 fingerprint 用于查重
+ * 算法: summary.trim().slice(0,50).toLowerCase() — 不再依赖 tags（Bug 3 修复）
  */
 function calcFingerprint(tags, summary) {
-  const sorted = (tags || []).sort().join(",");
-  const head = (summary || "").trim().slice(0, 50).toLowerCase();
-  return `${sorted}|${head}`;
+  const head = (summary || "").trim().slice(0, 50).toLowerCase().replace(/[\s]+/g, ' ');
+  return head;
 }
 
 /**
@@ -97,46 +96,27 @@ function calcScore(hitCount, lastHit, importance) {
 /**
  * v2: 按 fingerprint 在所有条目中搜索匹配
  */
-function searchByFingerprint(fp) {
-  // 🥇 Priority 1: Check consolidated cache first
-  let result = null;
-  const consolidated = readJSON("curated/consolidated.json");
-  if (consolidated && consolidated.entries) {
-    for (const e of consolidated.entries) {
-      const efp = e.fingerprint || calcFingerprint(e.tags, e.summary);
-      if (efp === fp && e.tier !== "archive") return e;
+function searchByFingerprint(f) {
+  const sfps = [f];
+  if (!f.includes('|')) sfps.push(f);
+  const c = readJSON('curated/consolidated.json');
+  if (c?.entries) for (const e of c.entries) {
+    const ef = e.fingerprint || calcFingerprint(e.tags, e.summary);
+    if (sfps.some(s => ef===s || ef.endsWith('|'+s)) && e.tier!=='archive') return e;
+  }
+  for (const d of ['auto/raw','auto']) for (const fn of listJSONFiles(d)) {
+    const es = readJSON(d+'/'+fn)||[]; for (const e of es) {
+      const ef = e.fingerprint||e.fp||calcFingerprint(e.tags||[], e.summary||e.s||'');
+      if (sfps.some(s => ef===s || ef.endsWith('|'+s)) && e.tier!=='archive') return e;
     }
   }
-  // 🥈 Priority 1.5: Raw logs (full detail fallback if title_only found above)
-  if (!result) {
-    const rawFiles = listJSONFiles("auto/raw");
-    for (const file of rawFiles) {
-      const entries = readJSON(`auto/raw/${file}`) || [];
-      for (const e of entries) {
-        const efp = e.fp || calcFingerprint([], e.s || '');
-        if (efp === fp) return { _raw_source: `auto/raw/${file}`, summary: e.s, type: e.tp, fingerprint: fp };
-      }
-    }
-  }
-  // 🥈 Priority 2: Fall back to auto/ daily files
-  const autoFiles = listJSONFiles("auto");
-  for (const file of autoFiles) {
-    const entries = readJSON(`auto/${file}`) || [];
-    for (const e of entries) {
-      const efp = e.fingerprint || calcFingerprint(e.tags, e.summary);
-      if (efp === fp && e.tier !== "archive") return e;
-    }
-  }
-  // 🥉 Priority 3: Other curated files
-  const curatedFiles = listJSONFiles("curated");
-  for (const file of curatedFiles) {
-    if (file === "consolidated.json") continue;  // already checked
-    const entry = readJSON(`curated/${file}`);
-    if (!entry) continue;
-    const arr = Array.isArray(entry) ? entry : [entry];
-    for (const e of arr) {
-      const efp = e.fingerprint || calcFingerprint(e.tags, e.summary);
-      if (efp === fp && e.tier !== "archive") return e;
+  for (const fn of listJSONFiles('curated')) {
+    if (fn==='consolidated.json') continue;
+    const e = readJSON('curated/'+fn); if(!e) continue;
+    const arr = Array.isArray(e)?e:[e];
+    for (const x of arr) {
+      const ef = x.fingerprint||calcFingerprint(x.tags||[], x.summary||'');
+      if (sfps.some(s => ef===s || ef.endsWith('|'+s)) && x.tier!=='archive') return x;
     }
   }
   return null;
@@ -559,6 +539,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     // ── write_or_merge ──
     case "write_or_merge": {
+      // Bug 4 fix: forbidden pattern filter
+      const forbiddenPatterns = [
+        /记忆(压缩|维护|巡检).*(完成|结果|报告)/i,
+        /记忆系统定时任务/i,
+        /(数据|层级).*(压缩|维护|巡检)/i,
+      ];
+      const hasCompressTag = tags.some(t => /^compress|^maintenance|^cron|^system$/.test(t));
+      if (hasCompressTag || forbiddenPatterns.some(p => p.test(summary) || p.test(detail))) {
+        return { content: [{ type: 'text', text: 'Rejected: system self-referential pattern detected. This type of content is not recorded.' }] };
+      }
+
       const type = args?.type || "knowledge";
       const summary = (args?.summary || "").trim();
       const detail = (args?.detail || "").trim();
@@ -681,17 +672,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     // ── get_context ──
     case "get_context": {
-      const cache = readJSON("cache/memory_cache.json") || {};
       const all = collectAllEntries();
       const hot = all.filter(e => e.tier === "hot" || e.score >= 8).sort((a, b) => b.score - a.score).slice(0, 20);
+      const warm = all.filter(e => e.tier === "warm" || (e.score >= 3 && e.score < 8));
+      const cold = all.filter(e => !e.tier || e.tier === "cold" || e.score < 3);
 
       return {
         content: [{ type: "text", text: JSON.stringify({
-          cache_summary: {
-            hot_count: cache.hot_tier?.count || 0,
-            warm_count: cache.warm_tier?.count || 0,
-            cold_count: cache.cold_tier?.count || 0,
-          },
+          stats: { total: all.length, hot: Math.min(hot.length, 20), warm: Math.min(warm.length, 100), cold: cold.length },
           hot_tier: hot.map(e => ({
             id: e.id, type: e.type, summary: e.summary,
             score: e.score, hit_count: e.hit_count, tags: e.tags,
@@ -819,17 +807,22 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     // ── get_stats ──
     case "get_stats": {
       const all = collectAllEntries();
-      const hot = all.filter(e => e.tier === "hot" || e.score >= 8);
-      const warm = all.filter(e => e.tier === "warm" || (e.score >= 3 && e.score < 8));
-      const cold = all.filter(e => !e.tier || e.tier === "cold" || e.score < 3);
-      const top5 = all.sort((a, b) => b.score - a.score).slice(0, 5);
+      const sorted = [...all].sort((a, b) => b.score - a.score);
+      const top5 = sorted.slice(0, 5);
+      // Mutually exclusive tier counting: no entry counted in two tiers
+      const hotIds = new Set();
+      const warmIds = new Set();
+      let hotCt = 0, warmCt = 0;
+      for (const e of sorted) {
+        if ((e.tier === 'hot' || e.score >= 8) && hotCt < 20) { hotIds.add(e.id); hotCt++; }
+        else if ((e.tier === 'warm' || (e.score >= 3 && e.score < 8)) && warmCt < 100) { warmIds.add(e.id); warmCt++; }
+      }
+      const coldCt = all.length - hotIds.size - warmIds.size;
 
       return {
         content: [{ type: "text", text: JSON.stringify({
           total: all.length,
-          hot: { count: Math.min(hot.length, 20), max: 20 },
-          warm: { count: Math.min(warm.length, 100), max: 100 },
-          cold: { count: cold.length },
+          hot: hotCt, warm: warmCt, cold: coldCt,
           top_scored: top5.map(e => ({ id: e.id, summary: e.summary, score: e.score, hit_count: e.hit_count, tier: e.tier })),
           schema_version: "4.2",
         }, null, 2) }],
