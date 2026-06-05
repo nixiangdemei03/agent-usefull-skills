@@ -70,7 +70,7 @@ mkdir -p "$MEMORY_DIR/cache"
 # Create empty consolidated template
 cat > "$MEMORY_DIR/curated/consolidated.json" << SMSEOF
 {
-  "schema_version": "4.03",
+  "schema_version": "4.04",
   "type": "consolidated",
   "description": "Smart Memory System — 你的记忆将从这里开始。安装后首次 compress 会自动填充。",
   "priority": 1,
@@ -83,7 +83,7 @@ SMSEOF
 # Create empty cache
 cat > "$MEMORY_DIR/cache/memory_cache.json" << SMSEOF
 {
-  "schema_version": "4.03",
+  "schema_version": "4.04",
   "hot_tier": {"count": 0, "max": 20, "entries": []},
   "stats": {"total_entries": 0}
 }
