@@ -694,7 +694,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
               consChanged = true;
             }
           }
-          if (consChanged) saveJSON("curated/consolidated.json", cons);
+          if (consChanged) writeJSON("curated/consolidated.json", cons);
         }
         // Update SQLite
         try {
