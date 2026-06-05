@@ -1,52 +1,91 @@
 # SMS v4 — 架构文档
 
-> Smart Memory System v4
-> 面向 AI Agent 的三层本地记忆系统，集成 FTS5 全文搜索。
+> 智能记忆系统 v4.05
+> 三层本地记忆系统，支持自动压缩与 supersedes 感知搜索。
 
 ---
 
-## 概述
+## 概览
 
-SMS 是一个持久化记忆系统，专为 AI Agent（Claude Code、OpenClaw、Gemini CLI 等）设计。
-记忆以 JSON 文件存储，通过 SQLite FTS5 提供快速全文搜索。
+SMS 是为 AI 代理（Claude Code、OpenClaw、Gemini CLI 等）设计的持久化记忆系统。
+以 JSON 文件存储结构化记忆，通过 SQLite FTS5 提供快速全文搜索，
+并根据重要性、最近使用频率、命中次数自动压缩/降级记忆。
 
-**核心设计原则：**
-- 纯本地 —— 无云服务、无 API、无向量数据库
-- 人类可读 —— 所有数据是 JSON，记事本即可查看
-- Git 友好 —— JSON diff/merge，支持团队协作
-- 零费用压缩 —— 无需 LLM 调用即可完成维护
+**设计原则：**
+- 纯本地 — 无云端、无 API、无向量数据库
+- 人类可读 — 所有数据为 JSON，记事本即可查看
+- Git 友好 — JSON diff/merge 支持团队协作
+- 零成本压缩 — 维护过程不消耗 LLM token
+- 自动化 — 闲时检测 + 定时压缩 + 交换式降级
+
+**当前版本：v4.05**
 
 ---
 
-## 三层架构
+## 三层存储架构
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    🥇 CONSOLIDATED                            │
+│                    🥇 CONSOLIDATED                           │
 │                   curated/consolidated.json                   │
-│          所有条目：fingerprint 去重合并，按 score 排序          │
-│          Hot（20 条）→ 高分，完整 detail                       │
-│          Cold（其余）→ title_only + source 指针                  │
-│          最高优先级检索目标                                      │
+│          所有条目：fingerprint 去重合并，按 score 排序        │
+│                                                                  │
+│          🔥 Hot  (上限 20)  → 高评分，全量 detail            │
+│              每次会话自动注入上下文                              │
+│                                                                  │
+│          ☀️ Warm (上限 100) → 中等评分，全量 detail           │
+│              搜索可见，不自动加载                                │
+│                                                                  │
+│          ❄️ Cold (无上限)    → title_only + SQLite 指针        │
+│              detail 存入 fts/memory.db，O(1) 检索              │
+│              被 superseded 的条目压缩时强制送入 cold             │
+│                                                                  │
+│          优先查询目标                                            │
 ├──────────────────────────────────────────────────────────────┤
-│                    🥈 每日文件                                 │
+│                    🥈 日文件                                   │
 │                   auto/YYYY-MM-DD.json                        │
-│          每天的完整 detail 条目                                │
+│          每天的全量 detail 条目                                │
 │          含 tags、context、author、contributors                │
-│          次优先级检索目标                                        │
+│          次级查询目标                                          │
 ├──────────────────────────────────────────────────────────────┤
-│                    🥉 RAW 日志                                │
+│                    🥉 原始日志                                 │
 │                  auto/raw/YYYY-MM-DD.raw.json                 │
-│          最小格式（约 50 字节/条）                              │
-│          永不删除 —— 永久审计追踪                              │
+│          最小格式（~50 bytes/条）                              │
+│          永不删除 — 永久审计追踪                               │
 ├──────────────────────────────────────────────────────────────┤
-│                    ⚡ FTS5 搜索索引                           │
+│                    ⚡ FTS5 搜索索引                            │
 │                    fts/memory.db                              │
 │          SQLite FTS5 全文搜索                                  │
-│          每次 compress 时自动重建                              │
-│          中英文混合文本自动分词                                  │
+│          Supersedes 感知：默认过滤旧条目                        │
+│          中英文边界分词，支持混合语言搜索                       │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 评分公式
+
+```
+Score = I × e^(-λt) × log(1 + f)
+
+I = 重要性 (1-10 分，写入时必传)
+λ = ln(2) / 21  (半衰期 = 21 天，单一连续 λ)
+t = 距离上次命中的天数
+f = 命中次数
+```
+
+活性标签（纯文本标记，非多个 λ 值）：
+| 时段 | 标签 |
+|------|------|
+| < 14 天 | 🔥 高活跃 |
+| 14-28 天 | ☀️ 中活跃 |
+| 28-42 天 | 🌥️ 低活跃 |
+| > 42 天 | 🌙 弱活跃 |
+
+### Superseded 惩罚
+
+标记为 `superseded: true` 的条目在每次压缩时**强制进入 Cold 层**，忽略评分。
+腾出的 Hot/Warm 位置立即由下一顺位的最高分有效条目填补。
 
 ---
 
@@ -55,189 +94,176 @@ SMS 是一个持久化记忆系统，专为 AI Agent（Claude Code、OpenClaw、
 ```
 对话产生知识点
          │
-         ├─→ auto/raw/*.raw.json   ← 最小日志（50B，永不删）
+         ├─→ auto/raw/*.raw.json   ← 最小日志（50B，永不删除）
          │
          ├─→ auto/*.json            ← 完整 detail + tags
          │
          └─→ compress.py 触发
                   │
-                  ├─ 1. dirty check（stat 比较，0.001s 跳过）
-                  ├─ 2. 读取 raw + auto + 上一次 consolidated
+                  ├─ 1. 脏检查（stat mtime，0.001s 跳过）
+                  ├─ 2. 读取 raw + auto + 上次 consolidated
                   ├─ 3. fingerprint 分组 → 去重合并
-                  ├─ 4. score = hit_count × recency
-                  ├─ 5. 分配层级（hot/warm/cold）
-                  ├─ 6. 冷门条目 → title_only
-                  ├─ 7. 写 consolidated.json
-                  └─ 8. 重建 FTS5 索引
+                  ├─ 4. score = I × e^(-λt) × log(f+1)
+                  ├─ 5. 交换式降级（Hot↔Warm↔Cold，数量对等）
+                  ├─ 6. 强制：superseded → Cold，重填 Hot/Warm
+                  ├─ 7. Cold 条目 title_only 压缩
+                  ├─ 8. Cold detail → SQLite memories 表
+                  ├─ 9. 写入 consolidated.json
+                  └─ 10. 重建 FTS5 索引
 ```
+
+### 压缩触发
+
+| 触发方式 | 条件 | 行为 |
+|---------|------|------|
+| **闲时** | Windows 用户空闲 >5 分钟（GetLastInputInfo）+ 6 次连续确认 | 有新内容→压缩。无新内容→跳过 |
+| **定时** | 每天系统 00:00 | 全量压缩 + 交换降级 + FTS5 重建 |
 
 ---
 
-## 计分公式
+## 交换式降级
 
 ```
-score = hit_count × recency_factor
+压缩前：
+  Hot (20)         Warm (N)         Cold (∞)
 
-recency_factor:
-  < 1 天 → 3.0    （刚提到）
-  < 7 天 → 1.5    （本周）
-  < 30 天 → 1.0   （本月）
-  更久   → 0.5    （很久以前）
+重算评分后：
+  Hot-bottom → Warm-front  （Hot 中评分最低的条目）
+  Warm-bottom → Cold       （数量 = Hot→Warm 的数量）
+  
+  Warm 饱和度 < 90%？ → 抑制 Cold 降级
+  Warm 超 100？       → 先接受溢出，逐步消化
 ```
 
-### 层级
-
-| 层级 | Score | 上限 | 会话行为 |
-|------|-------|------|---------|
-| 🔥 hot | ≥ 8 | 20 | 自动注入 system prompt |
-| ☀️ warm | ≥ 3 | 100 | 可检索，不自动加载 |
-| ❄️ cold | < 3 | ∞ | 仅保留 title，detail 通过 raw 回溯 |
-| 🗑️ archive | — | — | 知识已迁移到外部文档 |
+核心规则：**降级数量 = 升级数量**，不浪费层级名额，不产生溢出尖峰。
 
 ---
 
-## Title Only 压缩
+## Supersedes 机制
 
-冷门条目自动压缩为仅保留标题（约 100 字节 vs 原约 500 字节）：
+当新知识取代旧知识时（如改名 "NS5" → "Elio"）：
 
-```json
-// 冷门条目（title_only）
-{
-  "summary": "用户习惯用什么称呼",
-  "title_only": true,
-  "source_raw": "auto/raw/2026-06-04.raw.json",
-  "score": 1.5
-}
+```
+write_or_merge(
+  summary="我的名字是 Elio",
+  importance=10,
+  supersedes=["mem-旧名字的ID"]
+)
 ```
 
-title 本身就能回答大部分问题。需要完整 detail 时，按 fingerprint 回溯 raw 日志。
+### 效果
+
+| 搜索方式 | 默认行为 | 历史查询 |
+|---------|---------|---------|
+| `search_memories` | 只返回活跃（非 superseded）条目 | 检测"以前"/"之前"关键词→全部显示 |
+| `search_fts` | 过滤 superseded 条目 | 同上，由历史关键词触发 |
+| `get_context` | 仅活跃条目 | — |
+| `compress.py` | 强制 superseded → cold + title_only | — |
+| `update_entry` | 可恢复：`tier="hot"` 即可还原 | — |
+
+历史关键词：以前、之前、原来、以前叫什么、几月几号、previous、old name 等。
+结果按 `supersedes_index DESC` 排序（最新优先）。
 
 ---
 
 ## Fingerprint 去重
 
-`fingerprint = sorted(tags).join(',') + '|' + summary[0:50].lower()`
+**v4.03+**：`fingerprint = summary.trim().slice(0,50).toLowerCase()`
 
-相同 fingerprint = 同一知识点 → compress 时自动合并：
+不再包含 tags。向后兼容：查询时同时匹配旧格式（`tags|summary`）和新格式（纯 summary）。
+
+相同 fingerprint = 相同知识 → 压缩时自动合并：
 - hit_count 累加
-- contributors 自动合并
-- detail 按 author 前缀合并
+- contributors 去重合并
+- detail 按来源拼接
 - score 重新计算
 
 ---
 
 ## FTS5 搜索
 
-SQLite FTS5 全文索引，自动处理中英文混排分词：
+SQLite FTS5 全文搜索，中英文边界自动分词：
 
 ```
-原文:  "Q2用pipe chain实现'AA before BB'"
-处理后: "Q2 用 pipe chain 实现'AA before BB'"
+原文： "Q2用pipe chain实现'AA before BB'"
+分词后："Q2 用 pipe chain 实现'AA before BB'"
 ```
 
-可以搜 "pipe"、"chain"、"grep" 等关键词，即使它们紧邻中文字符。
+**Supersedes 过滤：**
+```sql
+WHERE memories_fts MATCH ?
+  AND (m.superseded IS NULL OR m.superseded = 0)
+```
 
-| 搜索方式 | 工具 | 速度 | 模糊度 |
-|---------|------|------|--------|
-| fingerprint 精确 | write_or_merge | 瞬间 | 精确 |
-| 字段搜索 | search_memories | ~50ms | 否 |
-| **FTS5 全文搜索** | **search_fts** | **~5ms** | **支持（BM25 排序）** |
+搜索方式：
+| 方法 | 工具 | 速度 | 模糊 | Supersedes 感知 |
+|------|------|------|------|----------------|
+| fingerprint 精确 | write_or_merge | 即时 | 精确 | ✅ |
+| 精确匹配 | search_memories | ~50ms | 否 | ✅ |
+| **全文搜索** | **search_fts** | **~5ms** | **是 (FTS5 BM25)** | ✅ |
+| LIKE 降级 | search_fts | ~50ms | 是 | ✅ |
 
 ---
 
-## MCP 服务工具
+## MCP 服务端工具（v4.05）
 
 | 工具 | 说明 |
 |------|------|
-| `search_fts` | FTS5 全文搜索，模糊匹配，BM25 相关性排序 |
-| `search_memories` | 传统 tag/type/关键词搜索 |
-| `write_or_merge` | 写入新条目，自动 fingerprint 去重 |
-| `hit_memory` | 标记条目被引用（增加 score） |
-| `get_context` | 获取当前 Hot 层上下文 |
-| `get_stats` | 系统统计和层级分布 |
+| `search_fts` | FTS5 全文搜索，模糊匹配，BM25 排序，supersedes 感知 |
+| `search_memories` | 按 tag/type/keyword 搜索，支持历史查询模式 |
+| `write_or_merge` | 写入新条目，fingerprint 去重 **必传 importance**，可选 supersedes |
+| `hit_memory` | 标记条目被引用。三路回写：auto→consolidated→SQLite |
+| `get_context` | 获取当前 Hot 层上下文（实时聚合，无静态缓存） |
+| `get_stats` | 系统统计，互斥 tier 分类 |
+| `recalc_score` | 按新公式重算单条或全量条目评分 |
+| `update_entry` | 直接修改 tier、importance 或 supersedes 状态 |
 
 ---
 
-## 文件结构
+## 闲时检测
 
 ```
-sms-memory/                      ← 安装时可配置
-├── schema.json                  ← 数据格式定义
-├── fts/
-│   └── memory.db                ← SQLite FTS5 搜索索引
-├── auto/
-│   ├── raw/                     ← 最小 raw 日志（永不删除）
-│   └── YYYY-MM-DD.json          ← 每日完整条目
-├── curated/
-│   └── consolidated.json        ← 最高优先级检索目标
-├── cache/
-│   └── memory_cache.json        ← Hot 层上下文缓存
-└── scripts/
-    ├── compress.py              ← 主压缩引擎
-    ├── rebuild_fts.py           ← FTS5 索引构建器
-    ├── consolidate.sh           ← Shell 合并封装
-    ├── cache_refresh.sh         ← 缓存更新
-    └── _summary.py              ← 层级摘要助手
+Windows 侧 (idle-detect.ps1)：
+  GetLastInputInfo → 每 10s → 写入 .claude/idle_state.txt
+
+WSL/压缩侧 (compress.py --auto)：
+  读取 idle_state.txt → 连续 6 次空闲（>5 min）→ 触发压缩
+  备选：直接调 PowerShell 若文件不可用
+  无法检测空闲 → 跳过压缩
 ```
 
 ---
 
-## SMS v4 vs claude-mem 对比
+## 文件结构（v4.05）
 
-| 维度 | claude-mem | SMS v4 |
-|------|-----------|--------|
-| 存储 | SQLite + Chroma 向量库 | **JSON + SQLite FTS5** |
-| 压缩 | LLM 语义摘要（秒级） | **文件 stat + 合并（毫秒级）** |
-| 搜索 | 向量语义 | **FTS5 全文搜索（精确 + 模糊）** |
-| Token 消耗 | ~26,800t/天 | **~1,660t/天** |
-| 离线 | ❌ 依赖 Chroma 服务 | ✅ **完全离线** |
-| 人类可读 | ❌ 二进制向量 | ✅ **cat 任意 JSON** |
-| Git 协作 | ❌ 不支持 | ✅ **JSON diff/merge** |
-| 压缩 500 条 | ~30-60 秒 | **~0.2 秒** |
-| 依赖 | Chroma + SQLite + Node | **Node.js + Python3 即可** |
-| 数据控制权 | Anthropic 服务器 | **你的本地文件系统** |
+```
+sms-v4/
+├── README.md              ← 概览
+├── docs/                  ← 文档
+│   ├── ARCHITECTURE.md    架构说明（英文）
+│   ├── ARCHITECTURE.zh.md 架构说明（中文）
+│   ├── INSTALL.md         安装指南（英文/中文）
+│   ├── MEMORY_SKILL.md    Agent 行为指南
+│   ├── 版本优化详情.md     版本更新日志
+│   └── SMS_vs_Claude_     与 claude-mem 对比
+├── install/               ← 安装与代码
+│   ├── install.sh         一键安装脚本
+│   ├── server.js          MCP 服务器
+│   ├── schema.json        数据格式定义（v4.05）
+│   ├── CLAUDE.md.template 自动记录规则
+│   ├── scripts/           compress.py、rebuild_fts.py 等
+│   └── package.json       依赖
+```
 
 ---
 
-## 自动化运行
+## 版本历史
 
-SMS v4 全自动运行，无需任何手动干预：
-
-### 每分钟（60 秒定时器）
-由 idle-monitor.ps1 管理（仅在 Claude 打开时运行，Claude 关闭时自动退出）。Linux/macOS 使用系统 crontab。
-完全独立运行，无需 OpenClaw。
-```
-每 60 秒 → compress.py --auto
-  ├─ 上次压缩 < 60 秒前？ → 跳过（防重复）
-  ├─ 有新数据吗？         → 跳过（dirty check，0.001s）
-  └─ 有新数据 + 闲置 >60 秒 → 全量压缩（0.2s）
-       ├─ fingerprint 去重合并
-       ├─ score 重算
-       ├─ title_only 降级
-       ├─ 写 consolidated.json
-       ├─ 重建 FTS5 索引
-       └─ 更新 .last_compress 锁
-```
-
-### 每日凌晨于本地系统时间执行 — 各时区自动适配
-```
-强制全量压缩，确保 FTS5 索引每日至少重建一次。
-```
-
-### CLAUDE.md（自动记录）
-安装时自动生成。Claude Code 按照以下规则工作：
-- 发现新知识/偏好/决策/失败时自动调用 `write_or_merge`
-- 回答历史问题前自动调用 `search_fts`
-- 自动过滤打招呼、确认、噪音
-- 无需用户指令，后台静默运行
-
----
-
-## 更新日志
-
-### v4（最新版）
-- **FTS5 中文搜索**：unicode61 分词器 + LIKE 回退。英文用 FTS5，中文自动回退到 SQL LIKE。
-- **search_fts 的 hit_count 追踪**：现在和 search_memories 一致，命中后自动递增。
-- **BM25 显示**：分数以正数显示（Math.abs）。
-- **自动压缩**：闲置 60 秒触发，午夜全量重建。
-- **CLAUDE.md**：自动记录规则，时区自动检测。
+| 版本 | 日期 | 主要变更 |
+|------|------|---------|
+| **v4.05** | 2026-06-05 | Superseded 强制→Cold + Hot 重填 |
+| v4.04 | 2026-06-05 | FTS5 supersedes 过滤 + SQLite 列补齐 |
+| v4.03 | 2026-06-05 | Supersedes 机制 + 历史查询 + 7 项 bug 修复 |
+| v4.02 | 2026-06-05 | MCP 工具扩展 + idle-detect.ps1 |
+| v4.01 | 2026-06-05 | 压缩引擎 v3：新评分、交换降级、SQLite cold |
+| v4.00 | 2026-06-04 | 初始发布：三层存储 + 基础压缩 + FTS5 |
