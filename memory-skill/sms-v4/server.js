@@ -37,7 +37,7 @@ const MEMORY_DIR = resolve(
 
 const SERVER_NAME = "ems-v4-mcp";
 const FTS_DB = join(MEMORY_DIR, "fts", "memory.db");
-const SERVER_VERSION = "4.0.0";
+const SERVER_VERSION = "4.1.0";
 
 // ── Helpers ──
 
