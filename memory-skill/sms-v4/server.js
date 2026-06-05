@@ -428,10 +428,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         
         const rows = db.prepare(sql).all(...params);
         
-        // Update hit_count for found entries
+        // Update hit_count for found entries (parameterized, no last_hit)
         for (const row of rows) {
           try {
-            db.exec("UPDATE memories SET hit_count = hit_count + 1, last_hit = datetime('now') WHERE id = '" + row.id.replace(/'/g, "''") + "'");
+            db.prepare("UPDATE memories SET hit_count = hit_count + 1 WHERE id = ?").run(row.id);
           } catch(e) { /* silently continue */ }
         }
         
@@ -466,7 +466,27 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         db.close();
         return { content: [{ type: "text", text: JSON.stringify({ total: 0, query: ftsQuery, entries: [] }, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: "Search failed: " + e.message, query: ftsQuery }, null, 2) }] };
+        // Bug 3 fix: FTS5 MATCH error (e.g. numbers parsed as column ref) → try LIKE fallback
+        try {
+          const db2 = new Database(FTS_DB, { readonly: true });
+          const cleanQ = (ftsQuery || "").replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, "").trim();
+          if (cleanQ) {
+            const likeQ = "%" + cleanQ + "%";
+            const likeRows = db2.prepare("SELECT id, type, summary, detail, tags, score, tier, hit_count, timestamp FROM memories WHERE summary LIKE ? OR detail LIKE ? OR tags LIKE ? LIMIT ?").all(likeQ, likeQ, likeQ, ftsLimit);
+            const likeResults = likeRows.map(r => ({
+              id: r.id, type: r.type, summary: r.summary, detail: (r.detail || "").slice(0, 300),
+              tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
+              score: r.score, tier: r.tier, hit_count: r.hit_count, timestamp: r.timestamp,
+              relevance: 1.0
+            }));
+            db2.close();
+            if (likeResults.length > 0) {
+              return { content: [{ type: "text", text: JSON.stringify({ total: likeResults.length, query: ftsQuery, entries: likeResults, mode: "like_fallback_after_error" }, null, 2) }] };
+            }
+          }
+          db2.close();
+        } catch(e2) {}
+        return { content: [{ type: "text", text: JSON.stringify({ total: 0, query: ftsQuery, entries: [], error: e.message, mode: "fallback" }, null, 2) }] };
       }
     }
 
@@ -680,7 +700,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       };
     }
 
-    // ── recalc_score ──
+    // ── recalc_score (v2: fix Bug 2 — last_hit→timestamp) ──
     case "recalc_score": {
       const recalcId = args?.entry_id || null;
       let count = 0;
@@ -689,9 +709,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       if (recalcId) {
         const row = db.prepare("SELECT * FROM memories WHERE id = ?").get(recalcId);
         if (row) {
-          const newScore = calcScore(row.hit_count, row.last_hit || row.timestamp, row.importance);
-          const allRows = db.prepare("SELECT id, hit_count, last_hit, importance FROM memories").all();
-          const scored = allRows.map(r => ({ ...r, _ns: calcScore(r.hit_count, r.last_hit, r.importance) }));
+          const newScore = calcScore(row.hit_count, row.timestamp, row.importance);
+          const allRows = db.prepare("SELECT id, hit_count, timestamp, importance FROM memories").all();
+          const scored = allRows.map(r => ({ ...r, _ns: calcScore(r.hit_count, r.timestamp, r.importance) }));
           scored.sort((a, b) => b._ns - a._ns);
           const pos = scored.findIndex(r => r.id === recalcId);
           const tier = pos < 20 ? "hot" : pos < 120 ? "warm" : "cold";
@@ -699,8 +719,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           count = 1;
         }
       } else {
-        const rows = db.prepare("SELECT id, hit_count, last_hit, importance FROM memories").all();
-        const scored = rows.map(r => ({ ...r, _ns: calcScore(r.hit_count, r.last_hit, r.importance) }));
+        const rows = db.prepare("SELECT id, hit_count, timestamp, importance FROM memories").all();
+        const scored = rows.map(r => ({ ...r, _ns: calcScore(r.hit_count, r.timestamp, r.importance) }));
         scored.sort((a, b) => b._ns - a._ns);
         scored.forEach((r, i) => {
           const tier = i < 20 ? "hot" : i < 120 ? "warm" : "cold";
@@ -710,9 +730,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       db.close();
 
+      // Refresh cache only (NOT compress.py — that would overwrite manual tiers)
       try {
         const { execSync } = require("child_process");
-        execSync(`python3 "${join(MEMORY_DIR, "scripts", "compress.py")}"`, { timeout: 10000 });
+        execSync(`bash "${join(MEMORY_DIR, "scripts", "cache_refresh.sh")}"`, { timeout: 5000, cwd: MEMORY_DIR });
       } catch(e) {}
 
       return {
@@ -723,7 +744,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       };
     }
 
-    // ── update_entry ──
+    // ── update_entry (v2: fix Bug 1 — 直写 consolidated, 不调 compress.py) ──
     case "update_entry": {
       const uid = args?.entry_id;
       if (!uid) return { content: [{ type: "text", text: "Error: entry_id required" }] };
@@ -734,47 +755,58 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       let db = null;
       try { db = new Database(FTS_DB); } catch(e) {}
 
-      const autoFiles = listJSONFiles("auto");
-      for (const file of autoFiles) {
-        const entries = readJSON(`auto/${file}`) || [];
-        for (let i = 0; i < entries.length; i++) {
-          if (entries[i].id === uid) {
-            if (newTier) entries[i].tier = newTier;
-            if (newImportance) entries[i].importance = newImportance;
-            entries[i].score = calcScore(entries[i].hit_count || 1, entries[i].last_hit, newImportance || entries[i].importance);
-            writeJSON(`auto/${file}`, entries);
+      // 1) Write to consolidated.json (primary data source, avoids compress.py override)
+      const consolidated = readJSON("curated/consolidated.json");
+      if (consolidated?.entries) {
+        for (const e of consolidated.entries) {
+          if (e.id === uid) {
+            if (newTier) e.tier = newTier;
+            if (newImportance) e.importance = newImportance;
+            e.score = calcScore(e.hit_count || 1, e.timestamp || e.last_hit, newImportance || e.importance);
+            saveJSON("curated/consolidated.json", consolidated);
             found = true;
-            if (db) {
-              if (newTier) db.prepare("UPDATE memories SET tier = ? WHERE id = ?").run(newTier, uid);
-              if (newImportance) db.prepare("UPDATE memories SET importance = ?, score = ? WHERE id = ?").run(newImportance, entries[i].score, uid);
-              if (!newImportance && newTier) db.prepare("UPDATE memories SET tier = ? WHERE id = ?").run(newTier, uid);
-            }
             break;
           }
         }
-        if (found) break;
       }
 
+      // 2) Also update auto/ files for next compress
       if (!found) {
-        const consolidated = readJSON("curated/consolidated.json");
-        if (consolidated?.entries) {
-          for (const e of consolidated.entries) {
-            if (e.id === uid) {
-              if (newTier) e.tier = newTier;
-              if (newImportance) e.importance = newImportance;
-              e.score = calcScore(e.hit_count || 1, e.last_hit, newImportance || e.importance);
-              saveJSON("curated/consolidated.json", consolidated);
+        const autoFiles = listJSONFiles("auto");
+        for (const file of autoFiles) {
+          const entries = readJSON(`auto/${file}`) || [];
+          for (let i = 0; i < entries.length; i++) {
+            if (entries[i].id === uid) {
+              if (newTier) entries[i].tier = newTier;
+              if (newImportance) entries[i].importance = newImportance;
+              entries[i].score = calcScore(entries[i].hit_count || 1, entries[i].timestamp || entries[i].last_hit, newImportance || entries[i].importance);
+              writeJSON(`auto/${file}`, entries);
               found = true;
               break;
             }
           }
+          if (found) break;
         }
       }
 
+      // 3) Update SQLite
+      if (db && found) {
+        if (newTier) db.prepare("UPDATE memories SET tier = ? WHERE id = ?").run(newTier, uid);
+        if (newImportance) {
+          const all = collectAllEntries();
+          const e = all.find(x => x.id === uid);
+          const s = calcScore(e?.hit_count || 1, e?.timestamp || e?.last_hit, newImportance);
+          db.prepare("UPDATE memories SET importance = ?, score = ? WHERE id = ?").run(newImportance, s, uid);
+        }
+        if (!newImportance && newTier) db.prepare("UPDATE memories SET tier = ? WHERE id = ?").run(newTier, uid);
+      }
+
       if (db) db.close();
+
+      // 4) Refresh cache (NOT compress.py — never overwrite manual tier settings)
       try {
         const { execSync } = require("child_process");
-        execSync(`python3 "${join(MEMORY_DIR, "scripts", "compress.py")}"`, { timeout: 10000 });
+        execSync(`bash "${join(MEMORY_DIR, "scripts", "cache_refresh.sh")}"`, { timeout: 5000, cwd: MEMORY_DIR });
       } catch(e) {}
 
       return {
