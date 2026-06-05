@@ -70,7 +70,7 @@ mkdir -p "$MEMORY_DIR/cache"
 # Create empty consolidated template
 cat > "$MEMORY_DIR/curated/consolidated.json" << SMSEOF
 {
-  "schema_version": "4.1",
+  "schema_version": "4.2",
   "type": "consolidated",
   "description": "Smart Memory System — 你的记忆将从这里开始。安装后首次 compress 会自动填充。",
   "priority": 1,
@@ -83,7 +83,7 @@ SMSEOF
 # Create empty cache
 cat > "$MEMORY_DIR/cache/memory_cache.json" << SMSEOF
 {
-  "schema_version": "4.1",
+  "schema_version": "4.2",
   "hot_tier": {"count": 0, "max": 20, "entries": []},
   "stats": {"total_entries": 0}
 }
@@ -255,9 +255,11 @@ if [[ -d "/mnt/c" ]]; then
   mkdir -p "$CLAUDE_DIR"
   cp "$SCRIPT_DIR/scripts/idle-monitor.ps1" "$CLAUDE_DIR/" 2>/dev/null
   cp "$SCRIPT_DIR/scripts/idle_monitor.ps1" "$CLAUDE_DIR/" 2>/dev/null
+  cp "$SCRIPT_DIR/scripts/idle-detect.ps1" "$CLAUDE_DIR/" 2>/dev/null
   cp "$SCRIPT_DIR/scripts/claude-sms.bat" "$CLAUDE_DIR/" 2>/dev/null
   echo -e "   ${GREEN}✅ Idle monitors installed:${NC}"
   echo -e "      $CLAUDE_DIR/idle-monitor.ps1   (Win32 API — monitors idle & compresses)"
+  echo -e "      $CLAUDE_DIR/idle-detect.ps1    (Claude Code: 6-sample idle detection)"
   echo -e "      $CLAUDE_DIR/idle_monitor.ps1   (Writes idle time to file for WSL side)"
   echo -e "      $CLAUDE_DIR/claude-sms.bat"
 

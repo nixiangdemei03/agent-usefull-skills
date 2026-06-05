@@ -37,7 +37,7 @@ const MEMORY_DIR = resolve(
 
 const SERVER_NAME = "ems-v4-mcp";
 const FTS_DB = join(MEMORY_DIR, "fts", "memory.db");
-const SERVER_VERSION = "4.0.0";
+const SERVER_VERSION = "4.2.0";
 
 // ── Helpers ──
 
@@ -799,7 +799,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           warm: { count: Math.min(warm.length, 100), max: 100 },
           cold: { count: cold.length },
           top_scored: top5.map(e => ({ id: e.id, summary: e.summary, score: e.score, hit_count: e.hit_count, tier: e.tier })),
-          schema_version: "2.0",
+          schema_version: "4.2",
         }, null, 2) }],
       };
     }

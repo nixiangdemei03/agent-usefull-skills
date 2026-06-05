@@ -11,7 +11,7 @@
 | `install.sh` | One-click installer (blank memory + CLAUDE.md + MCP config) |
 | `ARCHITECTURE.md` | System architecture doc (EN/ZH) |
 | `INSTALL.md` | Installation guide (EN/ZH) |
-| `schema.json` | Data format (v4.1) |
+| `schema.json` | Data format (v4.2) |
 | `CLAUDE.md.template` | Auto-recording rules |
 | `scripts/` | compress.py, rebuild_fts.py, etc. |
 
