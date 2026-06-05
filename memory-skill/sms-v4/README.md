@@ -1,23 +1,31 @@
 # SMS v4
 
 > FTS5 full-text search + auto-compress + CLAUDE.md auto-recording
-> Current recommended version.
+> Current recommended version: **v4.2**
 
-## Contents
+## Directory Structure
 
-| File | Purpose |
-|------|---------|
-| `server.js` | MCP server (search_fts FTS5 tool) |
-| `install.sh` | One-click installer (blank memory + CLAUDE.md + MCP config) |
-| `ARCHITECTURE.md` | System architecture doc (EN/ZH) |
-| `INSTALL.md` | Installation guide (EN/ZH) |
-| `schema.json` | Data format (v4.2) |
-| `CLAUDE.md.template` | Auto-recording rules |
-| `scripts/` | compress.py, rebuild_fts.py, etc. |
+```
+sms-v4/
+├── README.md              ← this file
+├── docs/                  ← documentation
+│   ├── ARCHITECTURE.md    System architecture (EN/ZH)
+│   ├── INSTALL.md         Installation guide (EN/ZH)
+│   ├── MEMORY_SKILL.md    Agent behavior guide
+│   ├── 版本优化详情.md     Version changelog
+│   └── SMS_vs_Claude_     Comparison with claude-mem
+├── install/               ← installation & code
+│   ├── install.sh         One-click installer
+│   ├── server.js          MCP server
+│   ├── schema.json        Data format (v4.2)
+│   ├── CLAUDE.md.template Auto-recording rules
+│   ├── scripts/           compress.py, rebuild_fts.py, etc.
+│   └── package.json       Dependencies
+```
 
 ## Quick Start
 
 ```bash
-bash install.sh
+bash install/install.sh
 # Restart Claude Code
 ```
