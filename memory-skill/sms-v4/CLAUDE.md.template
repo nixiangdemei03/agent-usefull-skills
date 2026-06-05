@@ -202,6 +202,20 @@ Every `write_or_merge` call **must** include `importance: 1-10`:
 
 ---
 
+### 🔧 MCP 工具参考
+
+| 工具 | 作用 | 调用时机 |
+|------|------|---------|
+| `write_or_merge` | 写入/合并记忆（**必传 importance**） | 学到新东西时 |
+| `hit_memory(id)` | 标记某条记忆被使用，增加 hit_count | 引用记忆后 |
+| `search_fts(query)` | FTS5 全文搜索 | 需要回忆时 |
+| `search_memories()` | 按 tag/type 搜索 | FTS 找不到时 |
+| `get_context()` | 获取 Hot 层 + 统计 | 会话启动时 |
+| `recalc_score(entry_id?)` | 按 `I × e^(-λt) × log(f+1)` 重算 score 和 tier | 手动触发降级/升级 |
+| `update_entry(entry_id, tier?, importance?)` | 直接修改 tier 或 importance | 需要校正记忆层级时 |
+
+---
+
 ## Reminder
 
 You are not a filing clerk. You are an intelligent assistant building a model of the user.
