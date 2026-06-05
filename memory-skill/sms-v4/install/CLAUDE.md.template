@@ -185,6 +185,26 @@ User: "I think I'll use Django because the team knows it and the ecosystem is ma
 
 Every `write_or_merge` call **must** include `importance: 1-10`:
 
+#### 🔄 Supersedes — 取代旧信息
+
+当新信息取代了旧信息（如改名、改配置、改偏好），使用 `supersedes` 参数：
+
+```
+write_or_merge(
+  type="decision",
+  summary="我的名字是Elio",
+  importance=10,
+  supersedes=["mem-旧的ID"]  ← 旧条目将被标记为 superseded
+)
+```
+
+- 搜索引擎默认**过滤** superseded 条目（你不会看到旧名字）
+- 用户问"以前叫什么"时会自动触发**历史查询模式**，按时间逆序返回
+- 用户问"某月某日"时可精确检索对应时间的记录
+- `supersedes` 支持多个 ID：`supersedes=["mem-A", "mem-B"]`
+
+#### Importance 对照表
+
 | 等级 | 含义 | 示例 |
 |------|------|------|
 | 10 | 核心身份/原则 | 职业、居住地、长期目标 |

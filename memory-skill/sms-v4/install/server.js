@@ -165,7 +165,7 @@ function ftsSearch(query, typeFilter, tierFilter, limit) {
 
   function addEntry(e) {
     if (e && e.id && !seen.has(e.id) && e.tier !== "archive") {
-      e.score = calcScore(e.hit_count, e.last_hit);
+      e.score = calcScore(e.hit_count, e.last_hit, e.importance || 5);
       seen.add(e.id);
       results.push(e);
     }
@@ -315,7 +315,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "write_or_merge",
-      description: "v2: 写入前查重（fingerprint）。命中则合并(hit_count+1)，不命中则新建。推荐使用这个。",
+      description: "v3: 写入前查重（fingerprint）。命中则合并(hit_count+1)，不命中则新建。可选 supersedes 声明取代旧条目。推荐使用。",
       inputSchema: {
         type: "object",
         properties: {
@@ -327,6 +327,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           context: { type: "string" },
           force_new: { type: "boolean", description: "跳过查重，强制新建（慎用）" },
           author: { type: "string", description: "Who wrote this (for cross-user merge tracking)" },
+          supersedes: { type: "array", items: { type: "string" }, description: "被取代的旧条目 ID 列表。新记录会覆盖这些旧条目的优先展示权" },
         },
         required: ["type", "summary", "importance"],
       },
@@ -479,12 +480,35 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const limit = args?.limit || 10;
       const cutoff = Date.now() - daysBack * 86400000;
 
+      // Historical query detection: keywords that ask about past/previous
+      const historicalHints = ["以前", "之前", "原来", "旧", "过去", "最早", "曾", "以前叫什么", "叫什么来着",
+                               "什么时候", "几月", "几号", "changed", "previous", "old name", "formerly",
+                               "before", "original", "used to", "initial"];
+      const isHistorical = historicalHints.some(h => query.includes(h));
+      // Date range extraction from query (e.g. "2月", "2026年2月")
+      const dateMatch = query.match(/(\d{4})?[年\s]*(\d{1,2})[月\s](\d{1,2})?[日号]?/);
+      const dateFilterFrom = dateMatch ? ((y, m, d) => {
+        const year = y ? parseInt(y) : 2026;
+        const month = parseInt(m);
+        const day = d ? parseInt(d) : 1;
+        return new Date(year, month - 1, day).getTime();
+      })(dateMatch[1], dateMatch[2], dateMatch[3]) : null;
+
       const all = collectAllEntries();
       const results = [];
 
       for (const e of all) {
+        if (e.superseded && !isHistorical) continue; // Default: filter superseded
         const ts = new Date(e.timestamp || e.last_hit || Date.now()).getTime();
         if (ts < cutoff) continue;
+        if (dateFilterFrom) {
+          const entryDate = new Date(e.timestamp || "").getTime();
+          if (entryDate && entryDate < dateFilterFrom) continue;
+          if (dateFilterFrom && dateMatch[3]) {
+            const dateFilterTo = new Date(dateMatch[1]?parseInt(dateMatch[1]):2026, parseInt(dateMatch[2])-1, parseInt(dateMatch[3])+1).getTime();
+            if (entryDate && entryDate > dateFilterTo) continue;
+          }
+        }
         if (typeFilter && e.type !== typeFilter) continue;
         if (tierFilter && e.tier !== tierFilter) continue;
         if (query) {
@@ -522,16 +546,25 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           last_hit: e.last_hit,
           tags: e.tags || [],
           importance: e.importance,
+          superseded: e.superseded || false,
+          supersedes_index: e.supersedes_index || 0,
+          superseded_by: e.superseded_by || "",
         });
       }
 
-      // Sort by score descending
-      results.sort((a, b) => b.score - a.score);
+      // Sort: if historical query, supersedes_index descending (newest first)
+      // Otherwise: score descending
+      if (isHistorical) {
+        results.sort((a, b) => (b.supersedes_index || 0) - (a.supersedes_index || 0));
+      } else {
+        results.sort((a, b) => b.score - a.score);
+      }
       const sliced = results.slice(0, limit);
 
       return {
         content: [{ type: "text", text: JSON.stringify({
           total_hits: sliced.length, query, limit,
+          historical_mode: isHistorical,  // signal that historical search was triggered
           entries: sliced,
         }, null, 2) }],
       };
@@ -539,7 +572,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     // ── write_or_merge ──
     case "write_or_merge": {
-      // Bug 4 fix: forbidden pattern filter
+      const type = args?.type || "knowledge";
+      const summary = (args?.summary || "").trim();
+      const detail = (args?.detail || "").trim();
+      const tags = args?.tags || [];
+
+      // Bug 4 fix: forbidden pattern filter (moved after variable definitions)
       const forbiddenPatterns = [
         /记忆(压缩|维护|巡检).*(完成|结果|报告)/i,
         /记忆系统定时任务/i,
@@ -550,10 +588,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return { content: [{ type: 'text', text: 'Rejected: system self-referential pattern detected. This type of content is not recorded.' }] };
       }
 
-      const type = args?.type || "knowledge";
-      const summary = (args?.summary || "").trim();
-      const detail = (args?.detail || "").trim();
-      const tags = args?.tags || [];
       if (args?.importance === undefined || args?.importance === null) {
         return { content: [{ type: "text", text: "Error: importance is required (1-10)." }] };
       }
@@ -608,6 +642,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       // 3. New entry
+      const supersedes = args?.supersedes || [];
       const newEntry = {
         author: args?.author || process.env.EMS_AUTHOR || "unknown",
         contributors: [args?.author || process.env.EMS_AUTHOR || "unknown"],
@@ -627,7 +662,50 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         importance,
         context,
         related_ids: [],
+        supersedes,  // points to old entries this replaces
+        supersedes_index: 1,  // default: first generation
       };
+
+      // Handle supersedes: mark old entries as superseded
+      if (supersedes.length > 0) {
+        let maxIdx = 1;
+        const autoFiles = listJSONFiles("auto");
+        for (const file of autoFiles) {
+          const entries = readJSON(`auto/${file}`) || [];
+          let changed = false;
+          for (const e of entries) {
+            if (supersedes.includes(e.id) && !e.superseded_by) {
+              e.superseded_by = newEntry.id;
+              e.superseded = true;
+              if ((e.supersedes_index || 0) >= maxIdx) maxIdx = (e.supersedes_index || 0) + 1;
+              changed = true;
+            }
+          }
+          if (changed) writeJSON(`auto/${file}`, entries);
+        }
+        // Also update consolidated
+        const cons = readJSON("curated/consolidated.json");
+        if (cons?.entries) {
+          let consChanged = false;
+          for (const e of cons.entries) {
+            if (supersedes.includes(e.id) && !e.superseded_by) {
+              e.superseded_by = newEntry.id;
+              e.superseded = true;
+              consChanged = true;
+            }
+          }
+          if (consChanged) saveJSON("curated/consolidated.json", cons);
+        }
+        // Update SQLite
+        try {
+          const db = new Database(FTS_DB);
+          for (const sid of supersedes) {
+            db.prepare("UPDATE memories SET superseded = 1, superseded_by = ? WHERE id = ?").run(newEntry.id, sid);
+          }
+          db.close();
+        } catch(e) {}
+        newEntry.supersedes_index = maxIdx;
+      }
 
       const today = new Date().toISOString().slice(0, 10);
       const relPath = `auto/${today}.json`;
@@ -673,9 +751,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     // ── get_context ──
     case "get_context": {
       const all = collectAllEntries();
-      const hot = all.filter(e => e.tier === "hot" || e.score >= 8).sort((a, b) => b.score - a.score).slice(0, 20);
-      const warm = all.filter(e => e.tier === "warm" || (e.score >= 3 && e.score < 8));
-      const cold = all.filter(e => !e.tier || e.tier === "cold" || e.score < 3);
+      const active = all.filter(e => !e.superseded);
+      const hot = active.filter(e => e.tier === "hot" || e.score >= 8).sort((a, b) => b.score - a.score).slice(0, 20);
+      const warm = active.filter(e => e.tier === "warm" || (e.score >= 3 && e.score < 8));
+      const cold = active.filter(e => !e.tier || e.tier === "cold" || e.score < 3);
 
       return {
         content: [{ type: "text", text: JSON.stringify({
@@ -751,7 +830,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             if (newTier) e.tier = newTier;
             if (newImportance) e.importance = newImportance;
             e.score = calcScore(e.hit_count || 1, e.timestamp || e.last_hit, newImportance || e.importance);
-            saveJSON("curated/consolidated.json", consolidated);
+            writeJSON("curated/consolidated.json", consolidated);
             found = true;
             break;
           }

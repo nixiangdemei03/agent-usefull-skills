@@ -147,10 +147,11 @@ def calc_days_since(last_hit_str):
 def build_fingerprint(e):
     fp = e.get('fingerprint', '') or e.get('fp', '')
     if fp:
+        # 兼容旧指纹 (tags+summary): 检查是否以 summary-only 开头
         return fp
-    tags = sorted(e.get('tags', []) or [])
     s = (e.get('summary', '') or e.get('s', '') or '').strip()[:50].lower()
-    return ','.join(tags) + '|' + s
+    s = ' '.join(s.split())  # 归一化空白
+    return s
 
 def get_importance_for_old_entry(e):
     """旧条目补 importance: hot=7, warm=5, cold=3"""
@@ -249,6 +250,10 @@ for fname in sorted(os.listdir(RAW_DIR)):
                 'tags': e.get('tags', []),
                 'tier': e.get('tier', ''),
                 'title_only': False,
+                'supersedes': e.get('supersedes', []),
+                'superseded': e.get('superseded', False),
+                'superseded_by': e.get('superseded_by', ''),
+                'supersedes_index': e.get('supersedes_index', 0),
             }
             all_entries.append(norm)
             source_stats['raw'] += 1
