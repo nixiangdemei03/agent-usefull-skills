@@ -1,6 +1,6 @@
 # SMS v4 — Architecture Document
 
-> Smart Memory System v4.05
+> Smart Memory System v4.06
 > A three-tier local memory system for AI agents with automatic compression and supersedes-aware search.
 
 ---
@@ -18,7 +18,7 @@ and automatically compresses/degrades memories based on importance, recency, and
 - Zero-cost compression — no LLM calls needed for maintenance
 - Automation — idle detection + scheduled compression + exchange demotion
 
-**Current version: v4.05**
+**Current version: v4.06**
 
 ---
 
@@ -208,7 +208,7 @@ Search types:
 
 ---
 
-## MCP Server Tools (v4.05)
+## MCP Server Tools (v4.06)
 
 | Tool | Description |
 |------|-------------|
@@ -237,7 +237,7 @@ WSL/Compress side (compress.py --auto):
 
 ---
 
-## File Structure (v4.05)
+## File Structure (v4.06)
 
 ```
 sms-v4/
@@ -252,7 +252,7 @@ sms-v4/
 ├── install/               ← Installation & code
 │   ├── install.sh         One-click installer
 │   ├── server.js          MCP server
-│   ├── schema.json        Data format (v4.05)
+│   ├── schema.json        Data format (v4.06)
 │   ├── CLAUDE.md.template Auto-recording rules
 │   ├── scripts/           compress.py, rebuild_fts.py, etc.
 │   └── package.json       Dependencies
@@ -264,7 +264,8 @@ sms-v4/
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
-| **v4.05** | 2026-06-05 | Superseded forced→cold + Hot refill |
+| **v4.06** | 2026-06-05 | Pure positional tier (no score thresholds), server/compress aligned |
+| v4.05 | 2026-06-05 | Superseded forced→cold + Hot refill |
 | v4.04 | 2026-06-05 | FTS5 supersedes filter + SQLite columns |
 | v4.03 | 2026-06-05 | Supersedes mechanism + historical search + 7 bugs fixed |
 | v4.02 | 2026-06-05 | MCP tools (recalc_score/update_entry) + idle-detect.ps1 |

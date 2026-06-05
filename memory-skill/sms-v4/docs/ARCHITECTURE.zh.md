@@ -1,6 +1,6 @@
 # SMS v4 — 架构文档
 
-> 智能记忆系统 v4.05
+> 智能记忆系统 v4.06
 > 三层本地记忆系统，支持自动压缩与 supersedes 感知搜索。
 
 ---
@@ -18,7 +18,7 @@ SMS 是为 AI 代理（Claude Code、OpenClaw、Gemini CLI 等）设计的持久
 - 零成本压缩 — 维护过程不消耗 LLM token
 - 自动化 — 闲时检测 + 定时压缩 + 交换式降级
 
-**当前版本：v4.05**
+**当前版本：v4.06**
 
 ---
 
@@ -205,7 +205,7 @@ WHERE memories_fts MATCH ?
 
 ---
 
-## MCP 服务端工具（v4.05）
+## MCP 服务端工具（v4.06）
 
 | 工具 | 说明 |
 |------|------|
@@ -234,7 +234,7 @@ WSL/压缩侧 (compress.py --auto)：
 
 ---
 
-## 文件结构（v4.05）
+## 文件结构（v4.06）
 
 ```
 sms-v4/
@@ -249,7 +249,7 @@ sms-v4/
 ├── install/               ← 安装与代码
 │   ├── install.sh         一键安装脚本
 │   ├── server.js          MCP 服务器
-│   ├── schema.json        数据格式定义（v4.05）
+│   ├── schema.json        数据格式定义（v4.06）
 │   ├── CLAUDE.md.template 自动记录规则
 │   ├── scripts/           compress.py、rebuild_fts.py 等
 │   └── package.json       依赖
@@ -261,7 +261,8 @@ sms-v4/
 
 | 版本 | 日期 | 主要变更 |
 |------|------|---------|
-| **v4.05** | 2026-06-05 | Superseded 强制→Cold + Hot 重填 |
+| **v4.06** | 2026-06-05 | 纯排位 tier 分配（弃用分数门槛），server/compress 对齐 |
+| v4.05 | 2026-06-05 | Superseded 强制→Cold + Hot 重填 |
 | v4.04 | 2026-06-05 | FTS5 supersedes 过滤 + SQLite 列补齐 |
 | v4.03 | 2026-06-05 | Supersedes 机制 + 历史查询 + 7 项 bug 修复 |
 | v4.02 | 2026-06-05 | MCP 工具扩展 + idle-detect.ps1 |
