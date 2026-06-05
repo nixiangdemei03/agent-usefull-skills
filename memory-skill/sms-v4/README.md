@@ -1,7 +1,7 @@
 # SMS v4
 
 > FTS5 full-text search + auto-compress + CLAUDE.md auto-recording
-> Current recommended version: **v4.2**
+> Current recommended version: **v4.03**
 
 ## Directory Structure
 
@@ -17,7 +17,7 @@ sms-v4/
 ├── install/               ← installation & code
 │   ├── install.sh         One-click installer
 │   ├── server.js          MCP server
-│   ├── schema.json        Data format (v4.2)
+│   ├── schema.json        Data format (v4.03)
 │   ├── CLAUDE.md.template Auto-recording rules
 │   ├── scripts/           compress.py, rebuild_fts.py, etc.
 │   └── package.json       Dependencies

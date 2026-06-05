@@ -1,5 +1,5 @@
 {
-  "schema_version": "4.2",
+  "schema_version": "4.03",
   "description": "EMS v3 — 三层架构：raw 全量日志 → 日去重文件 → 合并压缩 consolidated",
   "entry_types": {
     "knowledge": {

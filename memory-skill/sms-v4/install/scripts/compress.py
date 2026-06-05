@@ -522,7 +522,7 @@ cold_list = [e for e in merged_entries if e['tier'] == 'cold']
 title_only_count = sum(1 for e in merged_entries if e.get('title_only'))
 
 output = {
-    "schema_version": "4.2",
+    "schema_version": "4.03",
     "type": "consolidated",
     "priority": 1,
     "created": datetime.now(timezone.utc).isoformat(),
@@ -552,7 +552,7 @@ log(f"Tiers: Hot={len(hot_list)} Warm={len(warm_list)} Cold={len(cold_list)} (ti
 # ═══════════════════════════════════════════════════════════════
 
 cache = {
-    "schema_version": "4.2",
+    "schema_version": "4.03",
     "last_updated": datetime.now(timezone.utc).isoformat(),
     "hot_tier": {
         "count": len(hot_list),
