@@ -1,35 +1,164 @@
 #!/usr/bin/env python3
 """
-EMS v4 — Compress Engine
-三层压缩：raw 日志 → 去重合并 → title_only 分级 → consolidated.json
-含 dirty check，无变更时跳过（0.001s）。
+SMS v4 — Compress Engine v3
 
---auto mode: 用于每分钟 cron。检查最后活动时间和最后压缩时间，
-  只有对话停止 >1 分钟且上次压缩 >1 分钟前才执行。
+── 变更历史 ──
+v1 -> v2 (2026-06-05): 新评分公式, 闲时检测, 交换式降级, Cold 保留
+v2 -> v3 (2026-06-05): 半衰期 14→21天 (统一 λ), Warm 饱和度门限,
+                        SQLite 复用替代 full_detail.json, 容错闲时采样,
+                        Warm 溢出消化, 旧条目补 importance
 """
-import json, os, sys, glob
+import json, os, sys, glob, math, subprocess, sqlite3
 from datetime import datetime, timezone
 from collections import defaultdict
 
 MEMORY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 AUTO_DIR = os.path.join(MEMORY_DIR, 'auto')
 RAW_DIR = os.path.join(AUTO_DIR, 'raw')
-CURATED_FILE = os.path.join(MEMORY_DIR, 'curated', 'consolidated.json')
+CURATED_DIR = os.path.join(MEMORY_DIR, 'curated')
+CURATED_FILE = os.path.join(CURATED_DIR, 'consolidated.json')
 CACHE_FILE = os.path.join(MEMORY_DIR, 'cache', 'memory_cache.json')
+LOCK_FILE = os.path.join(MEMORY_DIR, '.last_compress')
+IDLE_FILE = '/mnt/c/Users/64608/.claude/idle_state.txt'   # 由 idle_monitor.ps1 写入
+IDLE_COUNTER = os.path.join(MEMORY_DIR, '.idle_counter')    # WSL 侧容错计数器
+FTS_DB = os.path.join(MEMORY_DIR, 'fts', 'memory.db')       # 冷数据 detail 存储
 
-# Types that always keep full detail
+HALF_LIFE_DAYS = 21     # 统一半衰期 → 21天衰减50%
+HOT_CAP = 20
+WARM_CAP = 100
+WARM_SATURATION = 90    # Warm 满 90% 时才开始 Warm→Cold 降级
+IDLE_THRESHOLD = 300    # 5分钟
+IDLE_SAMPLES_NEEDED = 6 # 连续 6 次采样才算闲时 (避免误触)
+
 FULL_TYPES = {'knowledge', 'decision', 'insight', 'failure'}
-# Types that prefer title_only
 TITLE_TYPES = {'event', 'context_switch', 'chat', 'chat_insight', 'preference'}
 
 def log(msg): print(f"[SMS-v4] {msg}")
 
-def latest_mtime(directory, pattern='*.json'):
-    """Latest modification time in a directory, or 0 if empty"""
-    files = glob.glob(os.path.join(directory, pattern))
-    if not files:
-        return 0
-    return max(os.path.getmtime(f) for f in files)
+# ═══════════════════════════════════════════════════════════════
+#  闲时检测 (v3: 文件读取 + PowerShell 备选 + 容错采样)
+# ═══════════════════════════════════════════════════════════════
+
+def read_idle_file():
+    """从 idle_monitor.ps1 写入的文件读取空闲秒数"""
+    try:
+        with open(IDLE_FILE) as f:
+            val = float(f.read().strip())
+            return val
+    except:
+        return -1.0
+
+def check_windows_idle_seconds():
+    """尝试多种方式获取 Windows 用户空闲秒数"""
+    # 方案 A: 读 idle_monitor.ps1 写入的文件 (推荐)
+    val = read_idle_file()
+    if val >= 0:
+        return val
+    # 方案 B: 直接调 PowerShell (备选)
+    ps_candidates = ['powershell.exe', '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe']
+    ps_cmd = 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SystemInformation]::IdleTime.TotalSeconds'
+    for ps_exe in ps_candidates:
+        try:
+            result = subprocess.run([ps_exe, '-Command', ps_cmd], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0 and result.stdout.strip():
+                return float(result.stdout.strip())
+        except:
+            continue
+    return -1.0
+
+def check_idle_with_counter():
+    """
+    容错采样: 连续 IDLE_SAMPLES_NEEDED 次都空闲才算闲时。
+    读取上一个 idle_counter 值，和当前比对判断。
+    """
+    idle_seconds = check_windows_idle_seconds()
+    if idle_seconds < 0:
+        log("  Idle detect unavailable — skip")
+        return False
+
+    is_idle_now = idle_seconds >= IDLE_THRESHOLD
+
+    # 读取上次的计数
+    prev_count = 0
+    prev_idle = False
+    if os.path.exists(IDLE_COUNTER):
+        try:
+            prev_str = open(IDLE_COUNTER).read().strip()
+            parts = prev_str.split(',')
+            prev_count = int(parts[0])
+            prev_idle = parts[1] == '1'
+        except:
+            pass
+
+    if is_idle_now:
+        if prev_idle:
+            # 连续空闲 → 计数+1
+            count = prev_count + 1
+            if count >= IDLE_SAMPLES_NEEDED:
+                open(IDLE_COUNTER, 'w').write(f'{count},1')
+                log(f"  User idle: {idle_seconds:.0f}s (confirm #{count})")
+                return True
+        else:
+            count = 0  # 从 0 开始计数 (不是 1)
+        open(IDLE_COUNTER, 'w').write(f'{count},1')
+        log(f"  User idle start ({idle_seconds:.0f}s), need {IDLE_SAMPLES_NEEDED} samples")
+    else:
+        open(IDLE_COUNTER, 'w').write('0,0')
+        log(f"  User active (idle: {idle_seconds:.0f}s) — reset counter")
+
+    return False
+
+# ═══════════════════════════════════════════════════════════════
+#  热度公式 Score = I × e^(-λt) × log(f+1), half_life=21天
+# ═══════════════════════════════════════════════════════════════
+
+def calc_score(importance, hit_count, days_since_last_hit):
+    """
+    Score = I × e^(-λt) × log(1 + f)
+
+    统一 λ = ln(2) / 21  (half_life = 21天)
+    14/28/42 天只是人类可读的活性标签，非三个 λ 值:
+      - <14 天: 高活跃
+      - 14-28 天: 中活跃
+      - 28-42 天: 低活跃
+      - >42 天: 弱活跃
+    分数随连续函数 e^(-λt) 平滑衰减，无跳跃。
+    """
+    i = max(1, min(10, importance if importance else 5))
+    lam = math.log(2) / HALF_LIFE_DAYS  # ≈ 0.033/天
+    decay = math.exp(-lam * max(0, days_since_last_hit))
+    freq = math.log(1 + max(0, hit_count))
+    return round(i * decay * freq, 2)
+
+def calc_days_since(last_hit_str):
+    if not last_hit_str:
+        return 999
+    try:
+        last = datetime.fromisoformat(last_hit_str)
+        if last.tzinfo is not None:
+            last = last.astimezone(timezone.utc)
+        else:
+            last = last.replace(tzinfo=timezone.utc)
+        diff = (datetime.now(timezone.utc) - last).total_seconds() / 86400
+        return max(0, diff)
+    except:
+        return 999
+
+def build_fingerprint(e):
+    fp = e.get('fingerprint', '') or e.get('fp', '')
+    if fp:
+        return fp
+    tags = sorted(e.get('tags', []) or [])
+    s = (e.get('summary', '') or e.get('s', '') or '').strip()[:50].lower()
+    return ','.join(tags) + '|' + s
+
+def get_importance_for_old_entry(e):
+    """旧条目补 importance: hot=7, warm=5, cold=3"""
+    imp = e.get('importance', 0)
+    if imp and imp > 0:
+        return imp
+    tier = e.get('tier', 'warm')
+    return {'hot': 7, 'warm': 5, 'cold': 3}.get(tier, 5)
 
 def load_json(path):
     try:
@@ -43,87 +172,58 @@ def save_json(path, data):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-def calc_recency(last_hit_str):
-    if not last_hit_str:
-        return 1.0
-    try:
-        diff_days = (datetime.now().timestamp() - datetime.fromisoformat(last_hit_str).timestamp()) / 86400
-    except:
-        return 1.0
-    if diff_days <= 1:    return 3.0
-    elif diff_days <= 7:  return 1.5
-    elif diff_days <= 30: return 1.0
-    else:                 return 0.5
+def latest_mtime(directory, pattern='*.json'):
+    files = glob.glob(os.path.join(directory, pattern))
+    if not files:
+        return 0
+    return max(os.path.getmtime(f) for f in files)
 
-def build_fingerprint(e):
-    fp = e.get('fingerprint', '') or e.get('fp', '')
-    if fp:
-        return fp
-    tags = sorted(e.get('tags', []) or [])
-    s = (e.get('summary', '') or e.get('s', '') or '').strip()[:50].lower()
-    return ','.join(tags) + '|' + s
+# ═══════════════════════════════════════════════════════════════
+#  Auto Mode — 闲时压缩 (v3: 容错采样)
+# ═══════════════════════════════════════════════════════════════
 
-LOCK_FILE = os.path.join(MEMORY_DIR, '.last_compress')
-
-# ─── Auto Mode (for cron / heartbeat) ─────────────────────────
-# Called every 60s. Only compresses if:
-# 1. New data exists (dirty check)
-# 2. Conversation has been stopped >1 minute
-# 3. Last compress was >1 minute ago
 AUTO_MODE = '--auto' in sys.argv
+
 if AUTO_MODE:
     now_ts = datetime.now().timestamp()
 
-    # Check 1: was last compress < 1 min ago? (avoid racing)
-    last_compress = 0
-    if os.path.exists(LOCK_FILE):
-        last_compress = os.path.getmtime(LOCK_FILE)
+    last_compress = os.path.getmtime(LOCK_FILE) if os.path.exists(LOCK_FILE) else 0
     if now_ts - last_compress < 60:
-        log("Auto: SKIP (last compress < 1 min ago)")
         sys.exit(0)
 
-    # Check 2: has raw/ dir actually changed since last compress?
+    if not check_idle_with_counter():
+        sys.exit(0)
+
     if os.path.exists(CURATED_FILE):
         consolidated_mtime = os.path.getmtime(CURATED_FILE)
-        latest_raw = latest_mtime(RAW_DIR)
-        latest_auto = latest_mtime(AUTO_DIR)
-        if consolidated_mtime >= latest_raw and consolidated_mtime >= latest_auto:
-            # Update lock so we don't keep checking
+        if consolidated_mtime >= latest_mtime(RAW_DIR) and consolidated_mtime >= latest_mtime(AUTO_DIR):
             open(LOCK_FILE, 'w').close()
-            log("Auto: SKIP (consolidated already current)")
             sys.exit(0)
 
-    log("Auto: NEED COMPRESS (conversation idle, new data found)")
+    log("Auto: PROCEED (idle confirmed + new data)")
 
-# ─── Step 0: Dirty Check ─────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  Step 0: Dirty Check
+# ═══════════════════════════════════════════════════════════════
 
 log("=== Compress Start ===")
-
-if not os.path.isdir(RAW_DIR):
-    os.makedirs(RAW_DIR, exist_ok=True)
-    log("Created raw/ directory")
+os.makedirs(RAW_DIR, exist_ok=True)
 
 if not AUTO_MODE:
-    consolidated_mtime = os.path.getmtime(CURATED_FILE) if os.path.exists(CURATED_FILE) else 0
-    latest_raw = latest_mtime(RAW_DIR)
-    latest_auto = latest_mtime(AUTO_DIR)
+    if os.path.exists(CURATED_FILE):
+        if os.path.getmtime(CURATED_FILE) >= latest_mtime(RAW_DIR) and os.path.getmtime(CURATED_FILE) >= latest_mtime(AUTO_DIR):
+            log("Dirty check: SKIP")
+            open(LOCK_FILE, 'w').close()
+            sys.exit(0)
+    log("Dirty check: NEED COMPRESS")
 
-    if consolidated_mtime >= latest_raw and consolidated_mtime >= latest_auto:
-        log(f"Dirty check: SKIP (consolidated is current)")
-        log(f"  consolidated: {datetime.fromtimestamp(consolidated_mtime).strftime('%H:%M:%S')}")
-        log(f"  raw/:         {datetime.fromtimestamp(latest_raw).strftime('%H:%M:%S') if latest_raw else 'empty'}")
-        sys.exit(0)
-
-    log(f"Dirty check: NEED COMPRESS")
-    log(f"  consolidated: {datetime.fromtimestamp(consolidated_mtime).strftime('%H:%M:%S') if consolidated_mtime else 'new'}")
-    log(f"  raw/:         {datetime.fromtimestamp(latest_raw).strftime('%H:%M:%S') if latest_raw else 'empty'}")
-
-# ─── Step 1: Collect all entries (raw + daily + existing consolidated) ──
+# ═══════════════════════════════════════════════════════════════
+#  Step 1: Collect all entries
+# ═══════════════════════════════════════════════════════════════
 
 all_entries = []
 source_stats = defaultdict(int)
 
-# 1a) From raw logs
 for fname in sorted(os.listdir(RAW_DIR)):
     if not fname.endswith('.raw.json'):
         continue
@@ -132,8 +232,7 @@ for fname in sorted(os.listdir(RAW_DIR)):
         continue
     for e in entries:
         if isinstance(e, dict):
-            # Normalize raw format → full entry format
-            raw_date = fname[:10]  # YYYY-MM-DD from filename
+            raw_date = fname[:10]
             raw_time = e.get('t', '12:00')
             iso_ts = f'{raw_date}T{raw_time}:00+10:00' if 'T' not in raw_time else raw_time
             norm = {
@@ -145,6 +244,7 @@ for fname in sorted(os.listdir(RAW_DIR)):
                 'fingerprint': e.get('fp', ''),
                 'hit_count': e.get('hit_count', 1),
                 'last_hit': iso_ts,
+                'importance': e.get('importance', 5),
                 'detail': e.get('detail', ''),
                 'tags': e.get('tags', []),
                 'tier': e.get('tier', ''),
@@ -153,7 +253,6 @@ for fname in sorted(os.listdir(RAW_DIR)):
             all_entries.append(norm)
             source_stats['raw'] += 1
 
-# 1b) From existing auto/ daily files
 for fname in sorted(os.listdir(AUTO_DIR)):
     if not fname.endswith('.json') or fname.startswith('.'):
         continue
@@ -167,7 +266,6 @@ for fname in sorted(os.listdir(AUTO_DIR)):
         all_entries.append(e)
         source_stats['auto'] += 1
 
-# 1c) From existing consolidated (if any)
 consolidated = load_json(CURATED_FILE)
 if consolidated and consolidated.get('entries'):
     for e in consolidated['entries']:
@@ -179,7 +277,9 @@ if consolidated and consolidated.get('entries'):
 
 log(f"Collected: raw={source_stats['raw']} auto={source_stats['auto']} consolidated={source_stats['consolidated']} total={len(all_entries)}")
 
-# ─── Step 2: Fingerprint group & merge ──────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  Step 2: Fingerprint group & merge
+# ═══════════════════════════════════════════════════════════════
 
 groups = defaultdict(list)
 for e in all_entries:
@@ -191,7 +291,6 @@ log(f"Fingerprint groups: {len(groups)}")
 
 merged_entries = []
 for fp, group in groups.items():
-    # Sort by hit_count desc
     group.sort(key=lambda e: (0 if e.get("_source","").startswith("auto") else 1, e.get("hit_count",1)), reverse=False)
     keeper = dict(group[0])
 
@@ -203,37 +302,31 @@ for fp, group in groups.items():
         last_hit = keeper.get('last_hit', '')
         last_author = keeper.get('author', keeper.get('last_author', ''))
         latest_type = keeper.get('type', '')
-
-        # Score order for picking the best detail
-        max_detail_type_score = 3 if 'detail' in keeper and keeper['detail'] else 0
+        importance = get_importance_for_old_entry(keeper)
 
         for dup in group[1:]:
             total_hits += dup.get('hit_count', 1)
-
-            # Contributors
             dc = set(dup.get('contributors', [dup.get('author', '')])) - {''}
             all_contribs |= dc
-
-            # Track source ids
             did = dup.get('id', '')
             if did and did not in source_ids:
                 source_ids.append(did)
-
-            # Last hit
             dh = dup.get('last_hit', '')
             if dh > last_hit:
                 last_hit = dh
-
-            # Author trail
             da = dup.get('author', dup.get('last_author', ''))
             if da:
                 last_author = da
-
-            # Take the most specific type
             if dup.get('type') and len(dup.get('type', '')) > len(latest_type):
                 latest_type = dup['type']
-
-            # Merge detail with source prefix
+            imp = dup.get('importance', 0)
+            if imp > importance:
+                importance = imp
+            elif imp == 0:
+                # 旧条目没 importance → 按 tier 推测
+                imp_tier = get_importance_for_old_entry(dup)
+                if imp_tier > importance:
+                    importance = imp_tier
             dd = dup.get('detail', '')
             ds = dup.get('_source', 'raw')
             if dd:
@@ -242,164 +335,254 @@ for fp, group in groups.items():
                     all_details.append(seg)
 
         keeper['hit_count'] = total_hits
+        keeper['importance'] = importance
         keeper['contributors'] = sorted(set(keeper.get('contributors', [keeper.get('author', '')])) | all_contribs)
         keeper['last_hit'] = last_hit
         keeper['last_author'] = last_author or keeper.get('author', '')
         keeper['type'] = latest_type or keeper.get('type', 'knowledge')
-
         if all_details:
             existing_seg = f"[{keeper.get('_source', '')}] {keeper.get('detail', '')}"
             keeper['detail'] = '\n---\n'.join([existing_seg] + all_details)
-
         if keeper.get('merged_from'):
             keeper['merged_from'] = list(set(keeper['merged_from'] + source_ids))
         elif source_ids:
             keeper['merged_from'] = source_ids
-
-    # ─── Step 3: Score & tier ─────────────────────
-
-    rf = calc_recency(keeper.get('last_hit', keeper.get('timestamp', '')))
-    keeper['score'] = round(keeper['hit_count'] * rf, 1)
-
-    score = keeper['score']
-    etype = keeper.get('type', 'knowledge')
-    hit = keeper.get('hit_count', 1)
-
-    # Tier
-    if score >= 8:
-        keeper['tier'] = 'hot'
-    elif score >= 3:
-        keeper['tier'] = 'warm'
     else:
-        keeper['tier'] = 'cold'
+        # 单条记录也补 importance
+        if not keeper.get('importance'):
+            keeper['importance'] = get_importance_for_old_entry(keeper)
 
-    # title_only decision
-    if keeper['tier'] in ('hot', 'warm'):
-        keeper['title_only'] = False
-    else:
-        # Cold: decide based on type and hit_count
-        if etype in FULL_TYPES:
-            keeper['title_only'] = False
-        elif etype in TITLE_TYPES:
-            keeper['title_only'] = True
-        else:
-            keeper['title_only'] = hit < 5  # unknown types: only if hit_count < 5
-
-    # If title_only, find source in raw
-    if keeper['title_only']:
-        # Try to find the raw source
-        raw_sources = []
-        for e in group:
-            src = e.get('_source', '')
-            if src.startswith('raw/'):
-                raw_sources.append(src)
-        keeper['source_raw'] = raw_sources[0] if raw_sources else 'auto/raw/unknown.raw.json'
-        if 'detail' in keeper:
-            del keeper['detail']
-
+    # 评分
+    days = calc_days_since(keeper.get('last_hit', keeper.get('timestamp', '')))
+    imp = keeper.get('importance', 5)
+    hits = keeper['hit_count']
+    keeper['score'] = calc_score(imp, hits, days)
     merged_entries.append(keeper)
 
-# Sort: score desc, then hot > warm > cold
-def sort_key(e):
-    tier_order = {'hot': 0, 'warm': 1, 'cold': 2}
-    return (tier_order.get(e.get('tier', 'cold'), 9), -e.get('score', 0))
+# ═══════════════════════════════════════════════════════════════
+#  Step 3: 交换式降级 (v3: Warm 饱和度门限 + 溢出消化)
+# ═══════════════════════════════════════════════════════════════
 
-merged_entries.sort(key=sort_key)
+# 记录旧 tier
+old_tier_map = {e.get('id', ''): e.get('tier', '') for e in merged_entries}
 
-# Cap hot at 20
-hot_ct = sum(1 for e in merged_entries if e['tier'] == 'hot')
-if hot_ct > 20:
-    for e in reversed(merged_entries):
-        if e['tier'] == 'hot':
-            e['tier'] = 'warm'
-            hot_ct -= 1
-            if hot_ct <= 20:
-                break
+merged_entries.sort(key=lambda e: -e.get('score', 0))
+total = len(merged_entries)
 
-# Cap warm at 100
-warm_ct = sum(1 for e in merged_entries if e['tier'] == 'warm')
-if warm_ct > 100:
-    for e in reversed(merged_entries):
-        if e['tier'] == 'warm':
-            e['tier'] = 'cold'
-            # Also apply title_only for newly demoted
-            etype = e.get('type', '')
-            if etype not in FULL_TYPES and e.get('hit_count', 1) < 5:
-                e['title_only'] = True
-            warm_ct -= 1
-            if warm_ct <= 100:
-                break
+# 顶级分配 → 算清数量
+hot_count = min(HOT_CAP, total)
+# Warm: 如果总条目不够填满 warm, 则 warm = 剩余, cold = 0
+remaining = total - hot_count
+warm_count = min(WARM_CAP, remaining)
+cold_count = remaining - warm_count
 
-# Build title_only source index
-title_only_entries = [e for e in merged_entries if e.get('title_only')]
+warm_saturation = 0
+if warm_count > 0:
+    warm_saturation = round(warm_count / WARM_CAP * 100, 0)
 
-# ─── Step 4: Write consolidated ─────────────────────────────
+# 如果 Warm 饱和度 < 90%，Cold 降级被抑制 → warm 扩张
+if warm_saturation < WARM_SATURATION and cold_count > 0:
+    # 扩张 warm 吞掉 cold（不踢出到 cold）
+    warm_count += cold_count
+    cold_count = 0
+
+# 如果 Warm 溢出（新增 hot 导致 warm 超 cap），消化 overflow
+overflow = max(0, warm_count - WARM_CAP)
+if overflow > 0:
+    # 放入 cold
+    warm_count = WARM_CAP
+    cold_count += overflow
+
+# 按 count 分配 tier
+for i in range(total):
+    e = merged_entries[i]
+    if i < hot_count:
+        e['tier'] = 'hot'
+    elif i < hot_count + warm_count:
+        e['tier'] = 'warm'
+    else:
+        e['tier'] = 'cold'
+
+# 交换统计
+demoted_hot = 0
+promoted_warm = 0
+demoted_warm = 0
+for e in merged_entries:
+    old = old_tier_map.get(e.get('id', ''), '')
+    if old == 'hot' and e['tier'] == 'warm':
+        demoted_hot += 1
+    elif old == 'warm' and e['tier'] == 'hot':
+        promoted_warm += 1
+    elif old == 'warm' and e['tier'] == 'cold':
+        demoted_warm += 1
+
+if any([demoted_hot, promoted_warm, demoted_warm]):
+    log(f"Exchange: {demoted_hot} hot→warm, {promoted_warm} warm→hot, {demoted_warm} warm→cold")
+log(f"Warm saturation: {warm_saturation}% {'(Cold eviction suppressed)' if warm_saturation < WARM_SATURATION else ''}")
+
+# title_only 判定
+for e in merged_entries:
+    if e['tier'] in ('hot', 'warm'):
+        e['title_only'] = False
+    else:
+        etype = e.get('type', 'knowledge')
+        hits = e.get('hit_count', 1)
+        if etype in FULL_TYPES:
+            e['title_only'] = False
+        elif etype in TITLE_TYPES:
+            e['title_only'] = True
+        else:
+            e['title_only'] = hits < 3
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 4: Cold detail → SQLite 存储 (替代 full_detail.json)
+# ═══════════════════════════════════════════════════════════════
+
+cold_detail_written = 0
+conn = None
+try:
+    conn = sqlite3.connect(FTS_DB)
+    c = conn.cursor()
+    # 确保 memories 表存在 (如果 FTS5 还未建)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            timestamp TEXT, type TEXT, summary TEXT,
+            detail TEXT DEFAULT '', tags TEXT DEFAULT '',
+            fingerprint TEXT DEFAULT '', hit_count INTEGER DEFAULT 1,
+            score REAL DEFAULT 0, tier TEXT DEFAULT 'warm',
+            importance INTEGER DEFAULT 5,
+            author TEXT DEFAULT '', contributors TEXT DEFAULT '',
+            date TEXT
+        )
+    ''')
+
+    for e in merged_entries:
+        detail = e.get('detail', '')
+        is_cold_title = (e['tier'] == 'cold' and e.get('title_only'))
+
+        if is_cold_title and detail:
+            # 写 detail 到 SQLite
+            c.execute('''
+                INSERT OR REPLACE INTO memories
+                (id, timestamp, type, summary, detail, tags, fingerprint,
+                 hit_count, score, tier, importance, author, contributors, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                e.get('id', ''),
+                e.get('timestamp', ''),
+                e.get('type', 'knowledge'),
+                e.get('summary', ''),
+                detail,  # 完整 detail 存入 SQLite
+                ','.join(e.get('tags', []) or []),
+                e.get('fingerprint', ''),
+                e.get('hit_count', 1),
+                e.get('score', 0),
+                e['tier'],
+                e.get('importance', 5),
+                e.get('author', ''),
+                '',
+                e.get('timestamp', '')[:10] if e.get('timestamp') else ''
+            ))
+            cold_detail_written += 1
+            # Cold title_only → 从 consolidated 中移除 detail
+            e['detail'] = ''
+            e['source_raw'] = e.get('_source', f'auto/{e.get("id","unknown")}')
+
+        elif is_cold_title:
+            # 没有 detail 的 cold → 只设 source 指针
+            e['source_raw'] = e.get('_source', f'auto/{e.get("id","unknown")}')
+
+    if cold_detail_written:
+        conn.commit()
+
+finally:
+    if conn:
+        conn.close()
+
+if cold_detail_written:
+    log(f"Cold detail stored in SQLite: {cold_detail_written} entries")
+
+# 清理内部字段
+for e in merged_entries:
+    e.pop('_source', None)
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 5: Write consolidated.json
+# ═══════════════════════════════════════════════════════════════
+
+hot_list = [e for e in merged_entries if e['tier'] == 'hot']
+warm_list = [e for e in merged_entries if e['tier'] == 'warm']
+cold_list = [e for e in merged_entries if e['tier'] == 'cold']
+title_only_count = sum(1 for e in merged_entries if e.get('title_only'))
 
 output = {
-    "schema_version": "3.0",
+    "schema_version": "4.0",
     "type": "consolidated",
-    "description": "EMS v3 最高优先级记忆检索源 —— 高频全量 + 低频 title_only",
     "priority": 1,
     "created": datetime.now(timezone.utc).isoformat(),
     "total_raw_entries": source_stats['raw'],
     "total_consolidated": len(merged_entries),
+    "scoring": f"Score = I × e^(-λt) × log(f+1), half_life={HALF_LIFE_DAYS}days",
     "tier_summary": {
-        "hot": sum(1 for e in merged_entries if e['tier'] == 'hot'),
-        "warm": sum(1 for e in merged_entries if e['tier'] == 'warm'),
-        "cold": sum(1 for e in merged_entries if e['tier'] == 'cold'),
-        "title_only": len(title_only_entries)
+        "hot": len(hot_list),
+        "warm": len(warm_list),
+        "cold": len(cold_list),
+        "title_only": title_only_count,
+        "warm_saturation_pct": warm_saturation,
     },
-    "stats": {
-        "compression_ratio": f"{source_stats['raw']}:{len(merged_entries)}",
-        "title_only_bytes_saved_est": len(title_only_entries) * 400
+    "exchange": {
+        "hot_to_warm": demoted_hot,
+        "warm_to_hot": promoted_warm,
+        "warm_to_cold": demoted_warm,
     },
     "entries": merged_entries
 }
 
 save_json(CURATED_FILE, output)
+log(f"Tiers: Hot={len(hot_list)} Warm={len(warm_list)} Cold={len(cold_list)} (title_only={title_only_count})")
 
-# ─── Step 5: Preserve daily auto/ files (they carry detail & tags for next compress)
-# Not deleted — consolidated is primary, auto/ is secondary retrieval source.
-
-# ─── Step 6: Refresh cache ──────────────────────────────────
-
-hot_entries = [e for e in merged_entries if e['tier'] == 'hot'][:20]
-warm_top = [e for e in merged_entries if e['tier'] == 'warm'][:5]
+# ═══════════════════════════════════════════════════════════════
+#  Step 6: Refresh cache
+# ═══════════════════════════════════════════════════════════════
 
 cache = {
-    "schema_version": "3.0",
+    "schema_version": "4.0",
     "last_updated": datetime.now(timezone.utc).isoformat(),
     "hot_tier": {
-        "count": len(hot_entries),
-        "max": 20,
+        "count": len(hot_list),
+        "max": HOT_CAP,
         "entries": [{
-            "id": e.get("id","") or e.get("fp","")[:20], "type": e.get("type","knowledge"), "summary": e.get("summary","") or e.get("s",""),
-            "score": e['score'], "hit_count": e['hit_count'],
-            "title_only": e.get('title_only', False),
-            "tags": e.get('tags', [])
-        } for e in hot_entries]
+            "id": e.get("id","") or e.get("fingerprint","")[:20],
+            "type": e.get("type","knowledge"),
+            "summary": e["summary"],
+            "score": e["score"],
+            "importance": e.get("importance", 5),
+            "hit_count": e["hit_count"],
+            "last_hit": e.get("last_hit", ""),
+            "tags": e.get("tags", [])
+        } for e in hot_list]
     },
-    "warm_tier": {"count": sum(1 for e in merged_entries if e['tier'] == 'warm')},
-    "cold_tier": {"count": sum(1 for e in merged_entries if e['tier'] == 'cold')},
-    "stats": output['tier_summary']
+    "warm_tier": {"count": len(warm_list)},
+    "cold_tier": {"count": len(cold_list)},
+    "stats": output["tier_summary"]
 }
 save_json(CACHE_FILE, cache)
 
-# ─── Report ────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  Report & FTS rebuild
+# ═══════════════════════════════════════════════════════════════
 
+log("=== Compress Complete ===")
 ts = output['tier_summary']
-# Touch lock file for auto-mode racing protection
+log(f"  Hot: {ts['hot']}  Warm: {ts['warm']}  Cold: {ts['cold']}  (title_only: {ts['title_only']})")
+log(f"  Exchange: {demoted_hot}→warm {promoted_warm}→hot {demoted_warm}→cold")
+
 try:
     open(LOCK_FILE, 'w').close()
 except:
     pass
-log("=== Compress Complete ===")
-log(f"  Hot: {ts['hot']}  Warm: {ts['warm']}  Cold: {ts['cold']}  (title_only: {ts['title_only']})")
-log(f"  Compression: {output['stats']['compression_ratio']}")
-log(f"  Est. tokens saved by title_only: {ts['title_only'] * 100} tokens (~{round(ts['title_only'] * 100 * 0.00015, 4)}$)")
 
-# ─── Step 7: Rebuild FTS5 index ───
-import subprocess
 fts_script = os.path.join(os.path.dirname(__file__), 'rebuild_fts.py')
 if os.path.exists(fts_script):
     log("Rebuilding FTS5 search index...")
@@ -409,4 +592,3 @@ if os.path.exists(fts_script):
             log(f"  {line.strip()}")
     if result.returncode != 0:
         log(f"  FTS error: {result.stderr.strip()}")
-

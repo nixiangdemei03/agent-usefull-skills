@@ -181,6 +181,27 @@ User: "I think I'll use Django because the team knows it and the ecosystem is ma
 
 ---
 
+### ⭐ Importance Guide (required: 1-10)
+
+Every `write_or_merge` call **must** include `importance: 1-10`:
+
+| 等级 | 含义 | 示例 |
+|------|------|------|
+| 10 | 核心身份/原则 | 职业、居住地、长期目标 |
+| 9 | 关键工作资料 | 技术栈、项目架构、API密钥位置 |
+| 8 | 重要偏好/规则 | 编码规范、常用工具链、禁止事项 |
+| 7 | 常用工作流 | 部署流程、测试方法、操作惯例 |
+| 6 | 有用知识 | 命令、配置技巧、已解bug |
+| 5 | 一般记录 | 当前任务进度、普通见闻 |
+| 4 | 临时上下文 | 当前会话相关的背景，可能过期 |
+| 3 | 低参考价值 | 琐碎细节、一次性信息 |
+| 2 | 几乎不用 | 过时知识、废弃方案 |
+| 1 | 仅存档 | 知道有这回事就行 |
+
+> 不传 importance 的 `write_or_merge` 会报错。拿不准时默认用 5。
+
+---
+
 ## Reminder
 
 You are not a filing clerk. You are an intelligent assistant building a model of the user.

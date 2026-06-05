@@ -35,7 +35,7 @@ const MEMORY_DIR = resolve(
       : join(process.cwd(), "memory")
 );
 
-const SERVER_NAME = "sms-v4-mcp";
+const SERVER_NAME = "ems-v4-mcp";
 const FTS_DB = join(MEMORY_DIR, "fts", "memory.db");
 const SERVER_VERSION = "4.0.0";
 
@@ -81,22 +81,17 @@ function calcFingerprint(tags, summary) {
 }
 
 /**
- * v2: 计算 recency_factor
+ * v3: 计算 score — Score = I × e^(-λt) × log(f+1)
+ * half_life = 21 days, importance 1-10
  */
-function recencyFactor(lastHit) {
-  if (!lastHit) return 1.0;
-  const diffDays = (Date.now() - new Date(lastHit).getTime()) / 86400000;
-  if (diffDays <= 1) return 3.0;
-  if (diffDays <= 7) return 1.5;
-  if (diffDays <= 30) return 1.0;
-  return 0.5;
-}
-
-/**
- * v2: 计算 score
- */
-function calcScore(hitCount, lastHit) {
-  return Math.round((hitCount || 1) * recencyFactor(lastHit) * 10) / 10;
+function calcScore(hitCount, lastHit, importance) {
+  const I = Math.max(1, Math.min(10, importance || 5));
+  const halfLifeDays = 21;
+  const lambda = Math.LN2 / halfLifeDays;
+  const diffDays = lastHit ? (Date.now() - new Date(lastHit).getTime()) / 86400000 : 0;
+  const decay = Math.exp(-lambda * Math.max(0, diffDays));
+  const freq = Math.log(1 + Math.max(0, hitCount || 1));
+  return Math.round(I * decay * freq * 100) / 100;
 }
 
 /**
@@ -181,7 +176,7 @@ function ftsSearch(query, typeFilter, tierFilter, limit) {
       fts_rank: r.rank
     }));
   } catch(e) {
-    console.error("[SMS-v4] FTS search error:", e.message);
+    console.error("[EMS-v4] FTS search error:", e.message);
     return null;
   }
 }
@@ -348,12 +343,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           summary: { type: "string", description: "One-line summary (max 200 chars)", maxLength: 200 },
           detail: { type: "string", description: "Detailed explanation" },
           tags: { type: "array", items: { type: "string" }, description: "Tags for dedup & categorization" },
-          importance: { type: "number", minimum: 1, maximum: 5 },
+          importance: { type: "number", minimum: 1, maximum: 10, description: "重要性评分 1-10 (影响热度计算和记忆保留时长)" },
           context: { type: "string" },
           force_new: { type: "boolean", description: "跳过查重，强制新建（慎用）" },
           author: { type: "string", description: "Who wrote this (for cross-user merge tracking)" },
         },
-        required: ["type", "summary"],
+        required: ["type", "summary", "importance"],
       },
     },
     {
@@ -479,11 +474,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         // On search hit, increment hit_count (in-memory for now)
         e.hit_count = (e.hit_count || 1) + 1;
         e.last_hit = now();
-        e.score = calcScore(e.hit_count, e.last_hit);
+        e.score = calcScore(e.hit_count, e.last_hit, e.importance);
+        
+        // For cold title_only entries, pull detail from SQLite
+        let detail = e.detail || '';
+        if ((e.tier === 'cold' || e.title_only) && !detail) {
+          try {
+            const db = new Database(FTS_DB, { readonly: true });
+            const row = db.prepare("SELECT detail FROM memories WHERE id = ?").get(e.id);
+            if (row && row.detail) detail = row.detail;
+            db.close();
+          } catch(ex) {}
+        }
+        
         results.push({
           id: e.id,
           type: e.type,
           summary: e.summary,
+          detail: detail.slice(0, 1000),
           tier: e.tier,
           score: e.score,
           hit_count: e.hit_count,
@@ -511,7 +519,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const summary = (args?.summary || "").trim();
       const detail = (args?.detail || "").trim();
       const tags = args?.tags || [];
-      const importance = args?.importance || 3;
+      if (args?.importance === undefined || args?.importance === null) {
+        return { content: [{ type: "text", text: "Error: importance is required (1-10)." }] };
+      }
+      const importance = args.importance;
       const context = args?.context || "";
       const forceNew = args?.force_new || false;
 
@@ -539,7 +550,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           if (detail && !existing.detail.includes(detail)) {
             existing.detail += "\n---\n" + detail;
           }
-          existing.score = calcScore(existing.hit_count, existing.last_hit);
+          existing.score = calcScore(existing.hit_count, existing.last_hit, existing.importance);
           if (importance > (existing.importance || 1)) existing.importance = importance;
 
           // Write back
@@ -576,7 +587,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         fingerprint: fp,
         hit_count: 1,
         last_hit: now(),
-        score: calcScore(1, now()),
+        score: calcScore(1, now(), importance),
         tier: "hot",
         importance,
         context,

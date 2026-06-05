@@ -1,15 +1,18 @@
 @echo off
-REM SMS v4 — Claude Code Launcher
-REM Starts idle monitor → runs Claude → on exit: compress + cleanup
+@echo off
+REM SMS v4 — Claude Code Launcher (v2)
+REM Starts both idle monitors → runs Claude → on exit: compress + cleanup
 
-REM Start idle monitor (hidden)
+REM Start idle monitors (hidden)
 start /B powershell -WindowStyle Hidden -File "%USERPROFILE%\.claude\idle-monitor.ps1"
+start /B powershell -WindowStyle Hidden -File "%USERPROFILE%\.claude\idle_monitor.ps1"
 
 REM Run Claude Code with all original arguments
 claude %*
 
 REM Claude exited — final compress
-wsl python3 /home/lzx020508/.openclaw/workspace/memory/scripts/compress.py --dir /mnt/c/Users/64608/sms-memory
+REM (Adjust the WSL path below to match your install)
+wsl python3 ~/.openclaw/workspace/memory/scripts/compress.py 2>nul
 
-REM Kill the idle monitor
-powershell -Command "Get-Process | Where-Object { $_.MainWindowTitle -eq '' -and $_.ProcessName -eq 'powershell' -and (Get-Process -Id $_.Id -ErrorAction SilentlyContinue) -and ($_.CommandLine -like '*idle-monitor*') } | Stop-Process -Force" 2>nul
+REM Kill idle monitors
+powershell -Command "Get-Process | Where-Object { $_.ProcessName -eq 'powershell' -and ($_.CommandLine -like '*idle-monitor*') } | Stop-Process -Force" 2>nul

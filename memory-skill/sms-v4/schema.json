@@ -64,7 +64,7 @@
       "tier_rules": {
         "hot":   {"min_score": 8,  "max": 20,  "retention": "全量 detail"},
         "warm":  {"min_score": 3,  "max": 100, "retention": "全量 detail"},
-        "cold":  {"min_score": 0,             "retention": "title_only，source 指针指向 raw"}
+        "cold":  {"min_score": 0,             "retention": "title_only + SQLite rowid 指针，detail 通过 FTS5 memories 表 O(1) 检索"}
       }
     }
   },
@@ -83,7 +83,7 @@
       "last_hit": {"type": "string"},
       "score": {"type": "number"},
       "tier": {"type": "string", "enum": ["hot", "warm", "cold", "archive"]},
-      "importance": {"type": "integer", "minimum": 1, "maximum": 5},
+      "importance": {"type": "integer", "minimum": 1, "maximum": 10, "description": "重要性评分 1-10, 影响热度计算权重"},
       "context": {"type": "string"},
       "related_ids": {"type": "array", "items": {"type": "string"}},
       "author": {"type": "string"},
@@ -101,21 +101,39 @@
     }
   },
   "scoring": {
-    "formula": "score = hit_count × recency_factor",
-    "recency_factor": {
-      "<1d": 3.0, "<7d": 1.5, "<30d": 1.0, "else": 0.5
+    "formula": "Score = I × e^(-λt) × log(f+1)",
+    "half_life_days": 21,
+    "lambda_per_day": 0.033,
+    "importance_scale": "1-10, 默认5",
+    "activity_labels": {
+      "<14d": "high",
+      "14-28d": "medium",
+      "28-42d": "low",
+      ">42d": "weak"
     },
     "title_only_threshold": {
       "cold_entries": true,
       "types_always_full": ["knowledge", "decision", "insight", "failure"],
       "types_prefer_title": ["event", "context_switch", "chat", "chat_insight"],
-      "override_if_hit_count_ge": 5
+      "override_if_hit_count_ge": 3
     }
   },
   "compress": {
-    "algorithm": "1) dirty check (stat) → 2) read raw logs → 3) fingerprint group → 4) merge & score → 5) title_only downgrade → 6) write consolidated",
-    "dirty_check": "compare mtime of compressed:latest_auto:latest_raw. 跳过若已最新",
-    "trigger": "会话结束时自动跑，心跳检查跳过无变更",
+    "version": "v3",
+    "algorithm": "1) dirty check → 2) fingerpt group & merge → 3) exchange demotion → 4) cold detail→SQLite → 5) write consolidated",
+    "exchange_demotion": {
+      "hot_cap": 20,
+      "warm_cap": 100,
+      "warm_saturation_pct": 90,
+      "description": "Hot-bottom→Warm-front, Warm-bottom→Cold, 数量对等. Warm <90% 时抑制 Cold 降级"
+    },
+    "idle_check": {
+      "threshold_sec": 300,
+      "method": "idle_monitor.ps1 (Win) + 6-sample consecutive counter",
+      "description": "检测 Windows 用户鼠标+键盘空闲 >5 分钟才触发"
+    },
+    "dirty_check": "compare mtime of compressed vs latest_raw/auto",
+    "trigger": "闲时 (5min idle) + 有新内容 或 每天 0 点定时",
     "typical_time_ms": 200
   }
 }

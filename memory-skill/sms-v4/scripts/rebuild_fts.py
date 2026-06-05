@@ -18,7 +18,7 @@ AUTO_DIR = os.path.join(MEMORY_DIR, 'auto')
 CURATED_FILE = os.path.join(MEMORY_DIR, 'curated', 'consolidated.json')
 FTS_DB = os.path.join(MEMORY_DIR, 'fts', 'memory.db')
 
-def log(msg): print(f"[SMS-v4] {msg}")
+def log(msg): print(f"[EMS-v4] {msg}")
 
 def rebuild():
     os.makedirs(os.path.dirname(FTS_DB), exist_ok=True)
@@ -58,18 +58,19 @@ def rebuild():
         )
     ''')
 
-    # Collect all entries (dedup by id)
+    # Collect all entries (dedup by id, prefer version WITH detail)
     all_entries = []
-    seen = set()
+    seen = {}  # id → index in all_entries
 
     if os.path.exists(CURATED_FILE):
         with open(CURATED_FILE) as f:
             data = json.load(f)
         for e in data.get('entries', []):
             eid = e.get('id', '')
-            if eid and eid not in seen:
-                seen.add(eid)
-                all_entries.append(e)
+            if eid:
+                if eid not in seen:
+                    seen[eid] = len(all_entries)
+                    all_entries.append(e)
 
     for fname in sorted(os.listdir(AUTO_DIR)):
         if not fname.endswith('.json') or fname == 'raw':
@@ -82,9 +83,18 @@ def rebuild():
             continue
         for e in entries:
             eid = e.get('id', '')
-            if eid and eid not in seen:
-                seen.add(eid)
-                all_entries.append(e)
+            if eid:
+                if eid not in seen:
+                    seen[eid] = len(all_entries)
+                    all_entries.append(e)
+                else:
+                    # 替换为 detail 更完整的版本
+                    idx = seen[eid]
+                    existing = all_entries[idx]
+                    new_detail = e.get('detail', '') or ''
+                    old_detail = existing.get('detail', '') or ''
+                    if len(new_detail) > len(old_detail):
+                        all_entries[idx] = e
 
     # Insert into memories + FTS5
     count = 0
