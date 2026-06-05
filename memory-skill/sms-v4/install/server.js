@@ -903,7 +903,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           total: all.length,
           hot: hotCt, warm: warmCt, cold: coldCt,
           top_scored: top5.map(e => ({ id: e.id, summary: e.summary, score: e.score, hit_count: e.hit_count, tier: e.tier })),
-          schema_version: "4.2",
+          schema_version: "v4.06",
         }, null, 2) }],
       };
     }
